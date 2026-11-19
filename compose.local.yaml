@@ -1,0 +1,6 @@
+# Host Python app connects to the existing CPU inference service on localhost.
+# Use alongside compose.yaml; start only inference, never app, with this override.
+services:
+  inference:
+    ports:
+      - "127.0.0.1:${LLM_PORT:-8080}:8080"

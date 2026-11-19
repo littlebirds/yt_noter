@@ -1,0 +1,70 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:${PORT:-8000}:8000"
+    environment:
+      DATA_DIR: /data
+      HF_HOME: /cache/huggingface
+      LLM_URL: http://inference:8080
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5-3b-instruct-q4_k_m}
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+      WHISPER_DEVICE: cpu
+      FEED_POLL_MINUTES: ${FEED_POLL_MINUTES:-15}
+      FEED_RECONCILE_HOURS: ${FEED_RECONCILE_HOURS:-6}
+      AUTH_TOKEN: ${AUTH_TOKEN:-}
+    volumes:
+      - library:/data
+      - speech-models:/cache
+    depends_on:
+      inference:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 35s
+
+  inference:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference
+      args:
+        LLAMA_IMAGE: ${LLAMA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
+    image: ${INFERENCE_IMAGE:-yt-summarizer-inference:qwen2.5-3b-q4_k_m}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command:
+      - --model
+      - /models/qwen2.5-3b-instruct-q4_k_m.gguf
+      - --alias
+      - ${LLM_MODEL:-qwen2.5-3b-instruct-q4_k_m}
+      - --ctx-size
+      - "8192"
+      - --parallel
+      - "1"
+      - --n-gpu-layers
+      - "0"
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      # Only model loading happens at startup; downloads happen during the build.
+      start_period: 2m
+
+volumes:
+  library:
+  speech-models:

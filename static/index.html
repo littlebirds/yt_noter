@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Noter — Video research library</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<aside class="sidebar">
+  <div class="brand-row"><a class="brand" href="/"><span class="brand-mark">n</span>Noter<span class="brand-dot">.</span></a><button id="llm-config" class="config-button" aria-label="Settings & setup" title="Settings & setup">⚙</button></div>
+  <p class="sidebar-label" data-i18n="workspace">YOUR WORKSPACE</p>
+  <nav aria-label="Main navigation">
+    <button class="nav active" data-view="discover"><span>＋</span><span data-i18n="newResearch">New research</span></button>
+    <button class="nav" data-view="library"><span>▤</span><span data-i18n="library">Library</span><b id="library-count">0</b></button>
+    <button class="nav" data-view="feeds"><span>◉</span><span data-i18n="feeds">Followed feeds</span></button>
+    <button class="nav" data-view="queue"><span>◷</span><span data-i18n="queue">Processing queue</span><b id="queue-count">0</b></button>
+  </nav>
+  <div class="sidebar-bottom"><div class="local-note"><span class="status-dot"></span><div><strong data-i18n="localFirst">Your research, your server.</strong><p data-i18n="localSub">Local models. Lasting knowledge.</p></div></div></div>
+</aside>
+<main>
+<header class="topbar"><span id="breadcrumb">Workspace / New research</span><div><span class="pill" data-i18n="nativeBadge">Original language preserved</span><button id="language" class="language" title="Switch interface language">中文</button></div></header>
+<button id="queue-overview" class="queue-overview" hidden></button>
+<div id="notice" class="notice" role="status" hidden></div>
+<section id="view-discover" class="view">
+  <div class="eyebrow"><span></span><span data-i18n="eyebrow">LESS WATCHING. MORE UNDERSTANDING.</span></div>
+  <h1 data-i18n="hero">Turn videos into<br>knowledge that stays.</h1>
+  <p class="intro" data-i18n="intro">Follow the ideas, not the endless tabs. Transcribe, summarize, and build a searchable research library—in the video's own language.</p>
+  <form id="discover-form" class="source-card">
+    <div class="card-title"><span class="number">01</span><h2 data-i18n="addSource">Start with a source</h2><span class="subtle" data-i18n="youtube">YOUTUBE</span></div>
+    <label for="source-url" data-i18n="sourceLabel">Video, playlist, or channel link</label>
+    <div class="source-row"><span class="link-icon">↗</span><input id="source-url" type="url" required placeholder="https://www.youtube.com/@YHGJ9527/posts" autocomplete="off"><button class="primary" type="submit" id="discover-button"><span data-i18n="findVideos">Find videos</span> <span>→</span></button></div>
+    <div id="discovery-status" class="discovery-status" role="status" aria-live="polite" hidden></div>
+    <p class="muted" data-i18n="followHint">Feeds are monitored for new uploads. Select existing videos below to summarize them.</p>
+    <div class="source-footer"><span data-i18n="postsHint">Channel /posts links open the channel’s video uploads.</span><label><span data-i18n="scanLimit">Entries per page</span> <select id="scan-limit"><option>25</option><option selected>50</option><option>100</option><option>250</option><option>500</option></select> <span data-i18n="videos">videos</span></label></div>
+  </form>
+  <div class="feature-grid"><article><div class="feature-icon">文 / A</div><h3 data-i18n="featureLanguage">Keep the original voice</h3><p data-i18n="featureLanguageText">Chinese stays Chinese. English stays English. No auto-translated captions.</p></article><article><div class="feature-icon">▦</div><h3 data-i18n="featureBatch">One video. Or a whole feed.</h3><p data-i18n="featureBatchText">Pick a few, take the latest N, or choose how far back to begin.</p></article><article><div class="feature-icon">⌕</div><h3 data-i18n="featureSearch">Connect the dots later</h3><p data-i18n="featureSearchText">Find ideas by ticker, creator, topic, and date—with the source attached.</p></article></div>
+  <section id="discovery" class="panel" hidden><div class="section-heading"><div><span class="eyebrow" data-i18n="sourceResults">SOURCE RESULTS</span><h2 id="discovery-title"></h2></div><span id="scan-note" class="muted"></span></div><details id="discovery-warning-panel" class="muted" hidden><summary id="discovery-warning-summary"></summary><ul id="discovery-warnings"></ul></details>
+    <div class="research-actions"><button id="process-selected" class="primary" disabled data-i18n="summarizeAction">Summarize</button><button id="save-selected" class="secondary" disabled data-i18n="addLibrary">Add to Library</button><span id="save-selection-hint" class="muted" data-i18n="saveHint">Summarize your selection first, then save it. Saving a feed also enables monitoring.</span></div>
+    <div class="selection-bar"><label><span data-i18n="selection">Selection</span><select id="selection-mode"><option value="manual" data-i18n="manual">Manually</option><option value="latest" data-i18n="latest">Last N videos</option><option value="window" data-i18n="dateWindow">Last N days</option></select></label><label for="selection-count"><span id="selection-count-label" data-i18n="selectionCount">Number (N)</span><input id="selection-count" type="number" min="1" step="1" value="5" disabled aria-describedby="selection-hint"></label><p id="selection-hint" class="muted" data-i18n="selectionHint">Select from loaded videos. Load more to include older results.</p><button type="button" id="select-all" class="secondary" data-i18n="selectAll">Select all</button><button type="button" id="clear-selection" class="text-button" data-i18n="clear">Clear</button></div>
+    <div id="discovery-list"></div><div class="discovery-pagination"><span id="discovery-count" class="muted"></span><button id="load-more" type="button" class="secondary" hidden data-i18n="loadMore">Load more videos</button></div><div class="batch-footer"><span id="selected-count"></span></div>
+  </section>
+</section>
+<section id="view-library" class="view" hidden>
+  <div class="eyebrow" data-i18n="researchArchive">YOUR RESEARCH ARCHIVE</div><div class="page-heading"><div><h1 data-i18n="libraryTitle">A little more perspective.</h1><p class="intro" data-i18n="libraryIntro">Every transcript, insight, and source. Ready when you need it.</p></div><button id="refresh-library" class="secondary" data-i18n="refresh">Refresh</button></div>
+  <div id="stats" class="stats"></div>
+  <form id="search-form" class="panel search-panel"><div class="search-row"><input id="query" type="search" placeholder="Search transcripts and summaries / 搜索原文" aria-label="Search library"><input id="ticker" placeholder="Ticker · NVDA" aria-label="Ticker"><button class="primary" data-i18n="search">Search</button></div><div class="filters"><label><span data-i18n="creator">Creator</span><select id="creator"><option value="" data-i18n="allCreators">All creators</option></select></label><label><span data-i18n="topic">Topic</span><select id="category"><option value="" data-i18n="allTopics">All topics</option><option value="finance" data-i18n="finance">Finance</option><option value="geopolitics" data-i18n="geopolitics">Geopolitics</option><option value="hardware" data-i18n="hardware">Hardware</option><option value="technology" data-i18n="technology">Technology</option><option value="education" data-i18n="education">Education</option><option value="other" data-i18n="other">Other</option></select></label><label><span data-i18n="from">From</span><input id="search-from" type="date"></label><label><span data-i18n="to">To</span><input id="search-to" type="date"></label><button type="button" id="reset-search" class="text-button" data-i18n="reset">Reset filters</button></div></form>
+  <div id="library-list"></div>
+</section>
+<section id="view-feeds" class="view" hidden><div class="eyebrow" data-i18n="alwaysLearning">ALWAYS LEARNING</div><h1 data-i18n="feedsTitle">Keep up, without keeping watch.</h1><p class="intro" data-i18n="feedsIntro">New uploads are summarized automatically. Backfills and checkpoints survive restarts, so gaps are caught up when the server returns.</p><p id="feed-interval" class="muted"></p><div id="feed-list"></div></section>
+<section id="view-queue" class="view" hidden><div class="eyebrow" data-i18n="inProgress">IN PROGRESS</div><h1 data-i18n="queueTitle">Let the ideas come to you.</h1><p class="intro" data-i18n="queueIntro">One job at a time keeps your server comfortable. You can leave this page; your queue is saved.</p><button id="refresh-queue" class="secondary" data-i18n="refresh">Refresh</button><p id="queue-status" class="muted" role="status"></p><div id="queue-stats" class="stats"></div><div id="job-list"></div></section>
+<section id="view-settings" class="view" hidden><div class="eyebrow" data-i18n="underHood">UNDER THE HOOD</div><h1 data-i18n="settingsTitle">Simple by design.</h1><p class="intro" data-i18n="settingsIntro">Local inference, persistent storage, and a CPU-friendly processing queue.</p><div class="panel"><h2 data-i18n="serverStatus">Server status</h2><div id="server-status" class="status-grid"></div><button id="refresh-status" class="secondary" data-i18n="checkAgain">Check again</button></div><form id="token-form" class="panel"><h2 data-i18n="accessToken">Server access token</h2><p class="muted" data-i18n="tokenHint">If AUTH_TOKEN is configured on the server, enter it here. It is stored only for this browser tab.</p><div class="search-row"><input type="password" id="access-token" autocomplete="off" aria-label="Server access token"><button class="primary" data-i18n="save">Save</button></div></form></section>
+<section id="view-detail" class="view" hidden><button id="back-library" class="text-button" data-i18n="backLibrary">← Back to library</button><div id="detail-header"></div><div class="detail-actions"><a id="watch-video" class="secondary" target="_blank" rel="noopener noreferrer" data-i18n="watchOriginal">Watch original ↗</a><button id="retry-summary" class="secondary" data-i18n="regenerate">Generate / retry summary</button><button id="export-video" class="primary" data-i18n="export">Export Markdown ↓</button></div><div class="tabs"><button class="tab active" data-tab="summary" data-i18n="summary">Summary</button><button class="tab" data-tab="transcript" data-i18n="transcript">Transcript</button><button class="tab" data-tab="mentions" data-i18n="stockMentions">Stock mentions</button></div><div id="detail-content" class="panel"></div></section>
+<footer><span>Noter.</span><span data-i18n="footer">A quieter place for your research.</span><span data-i18n="footerRight">SOURCE FIRST. ALWAYS.</span></footer>
+</main>
+<dialog id="llm-dialog" aria-labelledby="llm-dialog-title">
+<form id="llm-form">
+<div class="section-heading"><h2 id="llm-dialog-title" data-i18n="llmConfig">LLM configuration</h2><button id="llm-close" type="button" class="text-button" data-i18n="closeDialog">Close</button></div>
+<p class="muted" data-i18n="llmIntro">Use a local server or a public OpenAI-compatible Chat Completions API. Transcript content is sent to this endpoint.</p>
+<label><span data-i18n="llmEndpoint">API base URL</span><input id="llm-endpoint" type="url" required placeholder="http://127.0.0.1:8080/v1"></label>
+<label><span data-i18n="llmModel">Model name / alias</span><input id="llm-model" required maxlength="200" placeholder="qwen2.5-3b-instruct-q4_k_m"></label>
+<label><span data-i18n="llmFormat">API response format</span><select id="llm-format"><option value="local" data-i18n="llmLocal">Local llama.cpp (JSON schema)</option><option value="json" data-i18n="llmJson">Compatible API (JSON mode)</option><option value="text" data-i18n="llmText">Compatible API (prompt-only JSON)</option></select></label>
+<label><span data-i18n="llmKey">API key (optional for local servers)</span><input id="llm-key" type="password" autocomplete="new-password"></label>
+<p id="llm-key-status" class="muted"></p>
+<label class="key-clear"><input id="llm-clear-key" type="checkbox"><span data-i18n="llmClearKey">Remove saved API key</span></label>
+<p class="muted" data-i18n="llmApplyHint">Applies to subsequent summaries. A summary already running keeps its configuration. Blank key preserves the saved key.</p>
+<p id="llm-message" class="muted" role="status"></p>
+<div class="detail-actions"><button id="llm-test" type="button" class="secondary" data-i18n="llmTest">Test connection</button><button id="llm-save" class="primary" type="submit" data-i18n="save">Save</button></div>
+</form></dialog>
+</body></html>

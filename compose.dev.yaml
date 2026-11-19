@@ -1,0 +1,26 @@
+# Local development only. Requires Docker Compose 2.32+ for action: restart.
+# Apply alongside compose.yaml; production never mounts the working tree.
+services:
+  app:
+    volumes:
+      - type: bind
+        source: ./app
+        target: /app/app
+        read_only: true
+      - type: bind
+        source: ./static
+        target: /app/static
+        read_only: true
+    develop:
+      watch:
+        # Restart the entire app container so the old background worker exits
+        # before startup requeues interrupted jobs. No overlapping reload workers.
+        - action: restart
+          path: ./app
+          ignore:
+            - __pycache__/
+            - "*.pyc"
+        - action: rebuild
+          path: ./requirements.txt
+        - action: rebuild
+          path: ./Dockerfile
