@@ -315,3 +315,62 @@ test('LLM dialog loads redacted settings and saves configuration',async()=>{
  assert.equal(JSON.parse(call.options.body).model,'remote');
  assert.equal(closed,true);assert.equal(ui.elements.get('#llm-key').value,'');
 });
+
+test('Slides offers four-second scanning and distinguishes empty scans',async()=>{
+ const ui=await frontend();
+ const form={addEventListener(name,fn){this[name]=fn;}};
+ ui.elements.set('#slide-form',form);
+ ui.run("video={id:'abcdefghijk',slides:[],slide_scan:null}; renderSlides(document.querySelector('#detail-content'))");
+ assert.match(ui.elements.get('#detail-content').innerHTML,/value="4"/);
+ assert.match(ui.elements.get('#detail-content').innerHTML,/Scan this video to find slides/);
+ ui.run("video.slide_scan={minimum:6};renderSlides(document.querySelector('#detail-content'))");
+ assert.match(ui.elements.get('#detail-content').innerHTML,/No stable slide candidates/);
+ assert.match(ui.elements.get('#detail-content').innerHTML,/value="6"/);
+});
+
+test('Slide scrubber requests selected image and links original timestamp',async()=>{
+ const ui=await frontend();
+ for(const id of ['slide-position','slide-original','slide-image','slide-message','slide-first','slide-previous','slide-next','slide-last'])ui.elements.set('#'+id,{});
+ ui.run("activeTab='slides';video={id:'abcdefghijk',url:'https://www.youtube.com/watch?v=abcdefghijk',slides:[{position:0,start:12,end:20,timestamp:12}]}");
+ await ui.run('showSlide(0)');
+ assert.equal(ui.elements.get('#slide-original').href,'https://www.youtube.com/watch?v=abcdefghijk&t=12s');
+ assert.match(ui.elements.get('#slide-position').textContent,/1 \/ 1/);
+ assert.equal(ui.calls.at(-1).path,'/api/slides/abcdefghijk/0');
+});
+
+test('New app session clears stale draft results and makes the video eligible again',async()=>{
+ const ui=await frontend();
+ ui.run("acceptServerSession('session-one');discovery=[{id:'abcdefghijk',summary_ready:true}];selected.add('abcdefghijk');jobs=[{id:'old',video_id:'abcdefghijk',kind:'process',status:'done'}];video={id:'abcdefghijk',saved:false};activeDiscovery='old-discovery'");
+ assert.equal(ui.run("canSummarize('abcdefghijk')"),false);
+ ui.run("acceptServerSession('session-two')");
+ assert.equal(ui.run('discovery.length'),0);
+ assert.equal(ui.run('jobs.length'),0);
+ assert.equal(ui.run('selected.size'),0);
+ assert.equal(ui.run('video'),null);
+ assert.equal(ui.run('activeDiscovery'),null);
+ assert.equal(ui.run("canSummarize('abcdefghijk')"),true);
+ assert.equal(ui.elements.get('#discovery').hidden,true);
+});
+
+test('Refreshing within the same app session keeps draft results',async()=>{
+ const ui=await frontend();
+ ui.run("acceptServerSession('same');discovery=[{id:'abcdefghijk',summary_ready:true}];acceptServerSession('same')");
+ assert.equal(ui.run('discovery.length'),1);
+});
+
+
+test('Slide buttons navigate first, previous, next and last with boundary disabling',async()=>{
+ const ui=await frontend();
+ for(const id of ['slide-position','slide-original','slide-image','slide-message','slide-first','slide-previous','slide-next','slide-last','slide-form'])ui.elements.set('#'+id,{handlers:{},addEventListener(name,fn){this.handlers[name]=fn;}});
+ ui.run("activeTab='slides';video={id:'abcdefghijk',url:'https://www.youtube.com/watch?v=abcdefghijk',slides:[0,1,2].map(i=>({position:i,start:i*10,end:i*10+4,timestamp:i*10}))};renderSlides(document.querySelector('#detail-content'))");
+ assert.doesNotMatch(ui.elements.get('#detail-content').innerHTML,/type="range"|slide-scrubber/);
+ assert.equal(ui.elements.get('#slide-first').disabled,true);
+ assert.equal(ui.elements.get('#slide-previous').disabled,true);
+ await ui.elements.get('#slide-next').handlers.click();assert.equal(ui.run('slideIndex'),1);
+ await ui.elements.get('#slide-last').handlers.click();assert.equal(ui.run('slideIndex'),2);
+ assert.equal(ui.elements.get('#slide-next').disabled,true);assert.equal(ui.elements.get('#slide-last').disabled,true);
+ await ui.elements.get('#slide-previous').handlers.click();assert.equal(ui.run('slideIndex'),1);
+ await ui.elements.get('#slide-first').handlers.click();assert.equal(ui.run('slideIndex'),0);
+ ui.run('video.slides=video.slides.slice(0,1)');await ui.run('showSlide(99)');
+ for(const id of ['first','previous','next','last'])assert.equal(ui.elements.get('#slide-'+id).disabled,true);
+});

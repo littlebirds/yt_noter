@@ -1,3 +1,4 @@
 yt-dlp[default]>=2025.11.12
 faster-whisper>=1.1.1,<2
 gunicorn>=23,<24
+numpy>=1.26,<3

@@ -51,13 +51,13 @@ The startup command removes the obsolete Compose service containers, but does no
 1. Paste a source and click **Find videos** (or press Enter) to queue a YouTube lookup. Pasting alone does not fetch videos. Discovery does not save or subscribe to the source. The status below the input shows queued/running progress or an error. Results appear once publication-date lookups finish; large pages can take several minutes. A feed becomes monitored only when you explicitly save selected video links to Library.
 2. In **Source results**, choose **Manually**, **Last N videos**, or **Last N days**. A single **Number (N)** field sits to the right: disabled in manual mode and enabled for either automatic mode. N must be a positive whole number. Last N days uses the preceding N × 24 hours, with a fixed cutoff while additional pages load.
 3. Last-N-days, last-N-videos, and manual selection operate on loaded results. The preview scans 25–500 entries per page. Use **Load more videos** to append older entries; time-based selection includes newly loaded matching videos. Metadata failures remain visible with unknown dates and expandable error details; unknown dates are excluded from time-based selection but can be selected manually.
-4. Click **Summarize** at the top of the results to process the non-empty selection. Completed results can be opened using **View summary**. If their links are already saved, results appear in Library automatically; otherwise results remain drafts until saved.
+4. Click **Summarize** at the top of the results to process the non-empty selection. Completed results can be opened using **View summary**. If their links are already saved, results appear in Library automatically; otherwise results remain temporary drafts until saved or the app restarts.
 5. **Add to Library** is available whenever videos are selected, regardless of summarization status. It immediately saves their canonical video links and available metadata. Existing or later transcripts and summaries attach to those same records. Saving automatically queues summarization for selected videos without results, reuses queued/running jobs, and requeues failed attempts. Saving and queue insertion are atomic. Saving a feed also starts or resumes new-upload monitoring from now onward. Saving an individual video does not create a feed subscription. Repeated saves are idempotent.
-6. Changing selection alone never queues or saves videos. Processing drafts and jobs are persisted internally for restart recovery, but excluded from Library searches and counts. Existing library records are preserved by a one-time schema migration.
+6. Changing selection alone never queues or saves videos. Unsaved drafts, discovery results, jobs and summary checkpoints live in memory for the current app session. Restarting the app clears them. Only videos explicitly added to Library (including followed-feed uploads) are persisted and can resume after restart.
 7. **Followed feeds** shows monitoring progress and lets you pause/resume. Pausing stops subsequent scans; already queued or running processing finishes. Saved checkpoints allow monitoring to catch up after downtime. Existing subscriptions with an older backfill boundary retain that boundary.
 
 
-Checks are queued every `FEED_POLL_MINUTES` (15 by default, minimum 5). The serial processing worker keeps CPU use predictable; interactive Find videos lookups run on a separate worker and show persistent progress below the link field; an existing backlog can delay a check. Failed discovery pages retry at the next interval without advancing the checkpoint. Individual failed transcriptions/summaries can be retried from the queue. No duplicated automatic processing for already-seen videos; existing transcripts are reused on summary retries.
+Checks are queued every `FEED_POLL_MINUTES` (15 by default, minimum 5). The serial processing worker keeps CPU use predictable; interactive Find videos lookups run on a separate worker and show progress below the link field for the current app session; an existing backlog can delay a check. Failed discovery pages retry at the next interval without advancing the checkpoint. Individual failed transcriptions/summaries can be retried from the queue. No duplicated automatic processing for already-seen videos; existing transcripts are reused on summary retries.
 
 Channel `/posts`, `/streams`, and `/shorts` links normalize to the channel's **video uploads**. Text-only community posts and dedicated Shorts/live feeds are not ingested. Channel paging assumes YouTube's newest-first upload ordering and overlaps pages; playlists are scanned to the end because their ordering can be arbitrary. Deleted/private videos, unavailable dates, YouTube rate limits, or account restrictions can interrupt backfill; readable entries are queued, and errors are shown instead of silently advancing past failed metadata. When YouTube supplies only an upload date, it is stored as midnight UTC with `date_precision: day`; intraday filters cannot recover an unknown publication time. Automatic monitoring includes the whole boundary day for day-only dates so same-day new uploads are not lost.
 
@@ -65,7 +65,7 @@ Channel `/posts`, `/streams`, and `/shorts` links normalize to the channel's **v
 
 The app selects original caption tracks, excludes any track with a `tlang` translation parameter, and uses original auto-caption metadata ahead of localized language metadata. If the original language cannot be established or captions are unavailable, faster-whisper detects language from audio using `task=transcribe`, never `translate`. The audio fallback explicitly selects original-language audio when multiple dubbed tracks exist, and rejects ambiguous multilingual tracks. CPU uses INT8; a configured GPU failure falls back to CPU. The first speech transcription downloads its model into the cache.
 
-llama.cpp summarizes bounded transcript chunks and combines all section summaries hierarchically. It is instructed to preserve the original language and script. A script sanity check rejects clearly translated Chinese/English output; it is not a complete language or factual verifier. Small models can still misclassify topics and recommendations. Transcripts are committed **before** summarization so model failures do not lose source text.
+llama.cpp summarizes compact, indexed transcript chunks and combines groups of section notes within a context budget. It is instructed to preserve the original language and script. A script sanity check rejects clearly translated Chinese/English output; it is not a complete language or factual verifier. Small models can still misclassify topics and recommendations. Transcripts are committed **before** summarization so model failures do not lose source text.
 
 Ordinary YouTube playback ads generally are not part of downloaded source media. Creator-read sponsors remain in the original transcript; prompts exclude their pitches from the main summary. No SponsorBlock cutting is enabled, preserving original timestamps. YouTube delivery changes, including server-side ad experiments, may still require yt-dlp updates.
 
@@ -127,7 +127,7 @@ docker compose config --quiet
 
 Tests use temporary SQLite databases and mocked media/model adapters. They cover language selection, timestamp evidence, request validation, restart recovery, persistent monitoring and backfill, exports, and UI selection/rendering helpers. They do not replace an end-to-end deployment test with a real YouTube video and downloaded models.
 
-Implementation: `app/media.py` handles YouTube/ASR; `app/summarize.py` handles inference and validation; `app/db.py` owns storage; `app/feeds.py` owns subscriptions; `app/worker.py` runs persistent jobs; `app/server.py` serves the API; `static/` holds the UI. SQLite stores indexed video metadata plus raw metadata JSON, transcript segments, structured summaries, source-backed mentions, jobs, and feed checkpoints. Version markers prepare for future explicit schema migrations.
+Implementation: `app/media.py` handles YouTube/ASR; `app/summarize.py` handles inference and validation; `app/db.py` owns storage; `app/feeds.py` owns subscriptions; `app/worker.py` runs temporary draft jobs and persistent Library/feed jobs; `app/server.py` serves the API; `static/` holds the UI. The disk SQLite database stores saved Library metadata, transcripts, summaries, slides, source-backed mentions, jobs and feed checkpoints. Unsaved research uses a separate in-memory store. Version markers prepare for future explicit schema migrations.
 
 Upstream references: [yt-dlp JavaScript runtime requirements](https://github.com/yt-dlp/yt-dlp/wiki/EJS), [faster-whisper CPU inference](https://github.com/SYSTRAN/faster-whisper), [llama.cpp Docker](https://github.com/ggml-org/llama.cpp/blob/master/docs/docker.md), [llama-server API](https://github.com/ggml-org/llama.cpp/tree/master/tools/server).
 
@@ -153,3 +153,132 @@ Click the gear beside **Noter** in the left navigation. Enter an API base URL, m
 **Test connection** checks `/models` without saving or generating text. Some providers do not implement model listing, so test failure does not necessarily mean their chat endpoint is unavailable. Save applies to subsequent summaries; an ongoing summary keeps one configuration snapshot and records its actual model. Existing summaries are not automatically regenerated. Public endpoints receive the transcript text used for summarization.
 
 Settings override environment defaults and persist in `DATA_DIR/llm-settings.json` with owner-only file permissions. The API key is stored on the server, not returned by the settings API or stored in browser storage. Leave the key blank to retain it, or select **Remove saved API key**. Configuration uses the app's existing access-token protection; use that protection when exposing a shared server.
+
+### Stable slides
+
+Each video uses one composite job: **1/3 Transcript → 2/3 Summary → 3/3 Slides**,
+including feed-triggered processing. The job completes only when all stages finish.
+Existing completed stages are reused, including empty slide scans. A slide failure
+marks the composite job failed but retains its completed summary; queue **Retry**
+resumes without regenerating that summary, even for a forced summary regeneration.
+To scan again with the updated detector,
+open a video’s **Slides** tab and choose **Scan slides** without regenerating its summary. The default
+minimum hold is **4 seconds**, adjustable from 1–60 seconds. Use **⏮ Beginning**, **◀ Back**, **▶ Forward**, and **⏭ End** to browse images.
+Buttons disable at the corresponding boundaries. Open the original video at each
+capture’s timestamp.
+The interface supports English and Chinese; images retain the source language.
+
+The scanner downloads video up to 1080p (2 GB limit) and samples twice per second.
+It compares each frame with the beginning of its stable hold, tolerating subtitle
+changes in the top/bottom 12% when the central content is stable. A stable frame is
+only a candidate: OCR positions and image geometry must positively identify one of:
+
+- **Table:** at least **2 rows × 2 columns**, with separated cells aligned by their
+  left edge, right edge, or center. Gridlines are optional; blank grids do not qualify.
+- **Chart / graph:** intersecting axes, at least three numeric tick labels, and
+  interior plotted data beyond the gridlines. Labelled pie charts use a separate
+  circular-area/sector-contrast rule with at least two percentage labels.
+- **Bulleted / numbered list:** at least three aligned markers and text items.
+  Numbers must be consecutive; wrapped text is allowed between marked items.
+
+Regions must be large enough to be useful; OCR words below the readability/confidence
+threshold are ignored. Normal paragraphs, tiny attachments, and obvious navigation
+menus do not qualify. Repeated chat mentions/channel lists, reply controls and other
+conversation cues reject the whole screenshot even if it contains a small table.
+The detected region is then checked again across the minimum hold duration (four
+seconds by default); movement inside it can fail even when whole-frame movement is
+small. Captures retain the full image, original language and timestamp, and record
+whether the detected type is table, chart, or list. Earlier captures retain an unknown
+type until rescanned. Timing is approximate to the half-second sampling interval.
+
+These are conservative heuristics, not semantic recognition. Unusual charts, faint
+axes, OCR mistakes, compact tables, moving presenters and changing layouts can cause
+misses; unfamiliar comment interfaces may still pass. Plain text without list markers
+is intentionally excluded. OCR does not translate or modify the captured image.
+
+ffmpeg, NumPy, and Tesseract with English language data are required. Docker also
+includes Simplified/Traditional Chinese OCR data. For native Ubuntu/Debian installs:
+
+```bash
+sudo apt-get install tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim tesseract-ocr-chi-tra
+```
+
+Installed Chinese language data is used automatically; English-only installs have
+reduced coverage for Chinese comment interfaces. Missing/failed OCR fails the scan
+instead of silently saving unfiltered candidates. Existing saved scans are preserved;
+use **Slides → Scan slides** to apply the updated filter to an existing video.
+
+Temporary
+video downloads are cleaned up after scanning. Migration 6 adds slide images and scan
+metadata to SQLite without changing existing research. Migration 7 adds the detected
+content type while preserving earlier images. Completed scans replace images
+atomically, including an empty result; failed scans preserve previous results. Interrupted scans for saved Library videos restart from the beginning through the
+existing single-worker queue. Unsaved scans expire when the app restarts. Slide images
+use the same API authentication as transcripts and are not included in Markdown exports.
+
+
+### Summarization speed and recovery
+
+Prompts send `S42|"original transcript text"` instead of repeating timestamp fields.
+Original transcripts and timestamps remain unchanged in SQLite. Stock mentions must
+return an integer segment ID and an exact quote with the literal ticker in that same
+segment; the server resolves the original timestamp and rejects unsupported references.
+
+Batching uses a conservative UTF-8 byte upper bound for byte-tokenizer input, reserving
+room for system instructions, response schema/chat framing, retries and generated
+output within `LLM_CONTEXT_TOKENS` (8192 by default). This is deliberately conservative,
+not an exact model-tokenizer count. Do not set it above the inference server's context.
+Compose applies the value to both services; native mode requires exporting the value.
+
+Section notes target 1200 UTF-8 bytes, with a 1400-token response allowance
+including mention evidence. Notes above that writing target are accepted when they
+fit the safe merge capacity (roughly 2.1 KB per note with the default context). The
+hard limit reserves enough room for two notes plus their separator, ensuring each
+merge level can make progress. Retries for oversized notes include the measured byte
+count and a smaller explicit target. Notes are merged in groups that fit the remaining budget,
+rather than always merging pairs. Final synthesis allows 2200 output tokens. Oversized,
+empty, truncated or wrong-language output is retried once, then fails visibly rather
+than silently truncating source information or accepting invalid output.
+
+Migration 8 adds per-job section and merge checkpoints. Successful stages commit
+independently; **Retry** reuses them within the session. Restart recovery is available
+only for saved Library videos; unsaved checkpoints expire with the app session. Checkpoints are invalidated
+by changes to the transcript (including timestamps), language, model/endpoint, response
+format, context budget or prompt version. Merge checkpoints also depend on their exact
+input notes. **Generate / retry summary** starts a new job when no job is active, so an
+explicit regeneration makes fresh model calls; use the queue's **Retry** for a failed
+job if you want to resume it. Credentials are not stored in checkpoint fingerprints or
+payloads. Existing summaries and research are preserved.
+
+Transcription, summarization and slide scanning share one composite video job on the
+serial queue. Manual slide rescans use the same job type and reuse existing transcript
+and summary stages. Migration 10 folds pending legacy slide jobs into a matching
+video job, or converts them into composite jobs when no video job is active. Historical
+completed jobs and saved research are preserved. These changes do not introduce
+competing inference workers.
+
+
+### Temporary research sessions
+
+A session lasts for one **running app process**, shared by its browser tabs. Refreshing
+or closing a tab does not clear research. Restarting the local app, container, or Python
+auto-reloader ends the session and clears all unsaved transcripts, summaries, slides,
+discovery results, jobs, and summary checkpoints. Pasting an unsaved video again in the
+next session can therefore start fresh. Model caches and server settings remain persistent.
+
+Unsaved research is held in an in-memory SQLite store, never in `library.sqlite3`.
+Click **Add to Library** from discovery or a video's detail page to persist its current
+results and active jobs. Promotion is atomic and does not rerun completed work. If a
+worker is already processing it, subsequent results/checkpoints go to the saved Library.
+Saved feed subscriptions and their automatically saved uploads retain durable recovery.
+Removing a video from Library leaves its retained transcript/slides temporary for the
+remainder of the session. Draft images use RAM, so save useful results before restarting.
+
+Migration 9 removes legacy unsaved records from the active disk database. Before that
+one-time migration it creates a `*-legacy-drafts-*.sqlite3` backup beside the database,
+preserving pre-existing research without presenting it as current-session results.
+New drafts are never written to that backup. Existing Library entries are preserved.
+
+The browser detects a new app session on its next queue refresh and clears stale draft
+results and selections. A draft's retry/checkpoint recovery works only within that app
+session; save it to Library before a restart if it must survive.

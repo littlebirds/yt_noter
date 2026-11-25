@@ -1,4 +1,5 @@
 """WSGI API and static frontend. Production runs one Gunicorn worker with threads."""
+import base64
 import hmac
 import importlib.util
 import json
@@ -73,7 +74,7 @@ def api(method, path, query, body):
                 date.fromisoformat(query[key])
         return db.library(query)
     if method == 'GET' and path.startswith('/api/jobs/'):
-        with db.connect() as con:
+        with db.connect(job_id=path.removeprefix('/api/jobs/')) as con:
             row = con.execute('SELECT * FROM jobs WHERE id=?', (path.removeprefix('/api/jobs/'),)).fetchone()
         if not row:
             raise LookupError('Job not found.')
@@ -82,7 +83,7 @@ def api(method, path, query, body):
         result['result'] = json.loads(result.pop('result_json') or 'null')
         return result
     if method == 'GET' and path == '/api/jobs':
-        return {'jobs': worker_jobs()}
+        return {'jobs': worker_jobs(), 'session_id': db.session_store.session_id()}
     if method == 'GET' and path == '/api/status':
         settings = llm_settings.load()
         inference = False
@@ -129,6 +130,19 @@ def api(method, path, query, body):
         if not isinstance(force, bool):
             raise ValueError('force must be true or false.')
         return {'job_ids': [worker.enqueue('process', {'force': force}, ident) for ident in ids]}
+    if method == 'POST' and path == '/api/slides':
+        ident = valid_id(body.get('id'))
+        minimum = integer(body.get('minimum', 4), 1, 60)
+        if not db.detail(ident):
+            raise LookupError('Video not found.')
+        return {'job_id': worker.enqueue('slides', {'minimum': minimum}, ident)}
+    match = re.fullmatch(r'/api/slides/([A-Za-z0-9_-]{11})/(\d+)', path)
+    if method == 'GET' and match:
+        with db.connect(video_id=match[1]) as con:
+            row = con.execute('SELECT image FROM slides WHERE video_id=? AND position=?', (match[1], int(match[2]))).fetchone()
+        if not row:
+            raise LookupError('Slide not found.')
+        return {'image': 'data:image/jpeg;base64,' + base64.b64encode(row['image']).decode('ascii')}
     if method == 'POST' and path == '/api/retry':
         return {'job_id': worker.retry(str(body.get('id', '')))}
     raise LookupError('Endpoint not found.')
@@ -204,6 +218,7 @@ def application(environ, start_response):
 
 def start():
     db.init()
+    db.start_session()
     worker.STOP.clear()
     for discovery, name in [(False, 'video-worker'), (True, 'discovery-worker')]:
         threading.Thread(target=worker.run, kwargs={'discovery': discovery}, name=name, daemon=True).start()

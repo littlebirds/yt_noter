@@ -1,10 +1,9 @@
-"""SQLite persistence; each operation owns a short-lived connection."""
+"""Saved-library persistence plus session-only draft storage."""
 import json
-import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from . import config, search
+from . import config, search, session_store
 
 
 def now():
@@ -16,21 +15,22 @@ def dumps(value):
 
 
 @contextmanager
-def connect():
+def connect(video_id=None, job_id=None, temporary=False):
     config.DATA.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(config.DB, timeout=30)
-    con.row_factory = sqlite3.Row
-    con.execute('PRAGMA foreign_keys=ON')
-    try:
-        with con:
-            yield con
-    finally:
-        con.close()
+    with session_store.connection(config.DB, video_id, job_id, temporary) as con:
+        yield con
 
 
+def stores():
+    return (False, True) if session_store.active(config.DB) else (False,)
 
-def init():
-    with connect() as con:
+
+def start_session():
+    session_store.start(config.DB, init)
+
+
+def init(temporary=False):
+    with connect(temporary=temporary) as con:
         con.execute('PRAGMA journal_mode=WAL')
         con.executescript('''
         CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY);
@@ -94,6 +94,34 @@ def init():
             con.execute('INSERT OR IGNORE INTO library_items SELECT id,created_at FROM videos')
             con.execute('INSERT OR IGNORE INTO library_links SELECT url,id FROM videos')
             con.execute('INSERT INTO schema_version VALUES(3)')
+        if not con.execute('SELECT 1 FROM schema_version WHERE version=6').fetchone():
+            con.execute('CREATE TABLE slide_scans(video_id TEXT PRIMARY KEY REFERENCES videos(id), minimum REAL NOT NULL, created_at TEXT NOT NULL)')
+            con.execute("""CREATE TABLE slides(video_id TEXT NOT NULL REFERENCES videos(id), position INTEGER NOT NULL,
+                        start REAL NOT NULL, end REAL NOT NULL, timestamp REAL NOT NULL, image BLOB NOT NULL,
+                        PRIMARY KEY(video_id, position))""")
+            con.execute('INSERT INTO schema_version VALUES(6)')
+        if not con.execute('SELECT 1 FROM schema_version WHERE version=7').fetchone():
+            con.execute("ALTER TABLE slides ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'unknown'")
+            con.execute('INSERT INTO schema_version VALUES(7)')
+        if not con.execute('SELECT 1 FROM schema_version WHERE version=8').fetchone():
+            con.execute("""CREATE TABLE summary_checkpoints(
+                job_id TEXT NOT NULL REFERENCES jobs(id), fingerprint TEXT NOT NULL,
+                stage TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                PRIMARY KEY(job_id,fingerprint,stage))""")
+            con.execute('INSERT INTO schema_version VALUES(8)')
+        if not con.execute('SELECT 1 FROM schema_version WHERE version=10').fetchone():
+            for old in con.execute("SELECT * FROM jobs WHERE kind='slides' AND status IN ('queued','running','failed')").fetchall():
+                active = con.execute("SELECT id,payload_json FROM jobs WHERE kind='process' AND video_id=? AND status IN ('queued','running')", (old['video_id'],)).fetchone()
+                payload = json.loads(old['payload_json'])
+                if active:
+                    combined = json.loads(active['payload_json'])
+                    combined.update({'force_slides': True, 'minimum': payload.get('minimum', 4)})
+                    con.execute('UPDATE jobs SET payload_json=? WHERE id=?', (dumps(combined),active['id']))
+                    con.execute("UPDATE jobs SET status='cancelled',progress='Included in composite video job',updated_at=? WHERE id=?", (now(),old['id']))
+                else:
+                    payload['force_slides'] = True
+                    con.execute("UPDATE jobs SET kind='process',payload_json=? WHERE id=?", (dumps(payload),old['id']))
+            con.execute('INSERT INTO schema_version VALUES(10)')
         search.initialize(con)
         # Retire removed capture jobs without deleting historical records or media.
         con.execute("UPDATE jobs SET status='cancelled', progress='Capture feature removed', error=NULL, updated_at=? WHERE kind='frame' AND status IN ('queued','running','failed')", (now(),))
@@ -102,7 +130,7 @@ def init():
 
 
 def save_video(video):
-    with connect() as con:
+    with connect(video_id=video['id']) as con:
         con.execute('''INSERT INTO videos(id,url,title,creator,channel_id,published_at,duration,metadata_json,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
         title=excluded.title, creator=excluded.creator, channel_id=excluded.channel_id,
@@ -117,7 +145,7 @@ def save_video(video):
 
 def save_transcript(video_id, language, source, segments):
     text = '\n'.join(s['text'] for s in segments)
-    with connect() as con:
+    with connect(video_id=video_id) as con:
         con.execute('INSERT OR REPLACE INTO transcripts VALUES(?,?,?,?,?,?)',
                     (video_id, language, source, text, dumps(segments), now()))
         con.execute('UPDATE videos SET language=?, updated_at=? WHERE id=?', (language, now(), video_id))
@@ -125,7 +153,7 @@ def save_transcript(video_id, language, source, segments):
 
 
 def save_summary(video_id, result, model):
-    with connect() as con:
+    with connect(video_id=video_id) as con:
         con.execute('INSERT OR REPLACE INTO summaries VALUES(?,?,?,?,?)',
                     (video_id, result['summary'], model, dumps(result), now()))
         con.execute('UPDATE videos SET category=?,updated_at=? WHERE id=?',
@@ -141,7 +169,7 @@ def save_summary(video_id, result, model):
 
 
 def detail(video_id):
-    with connect() as con:
+    with connect(video_id=video_id) as con:
         row = con.execute('SELECT * FROM videos WHERE id=?', (video_id,)).fetchone()
         if not row:
             return None
@@ -153,6 +181,9 @@ def detail(video_id):
             result['transcript']['segments'] = json.loads(result['transcript'].pop('segments_json'))
         result['saved'] = bool(con.execute('SELECT 1 FROM library_items WHERE video_id=?', (video_id,)).fetchone())
         result['source_urls'] = [r[0] for r in con.execute('SELECT source_url FROM library_links WHERE video_id=?', (video_id,))]
+        scan = con.execute('SELECT minimum,created_at FROM slide_scans WHERE video_id=?', (video_id,)).fetchone()
+        result['slide_scan'] = dict(scan) if scan else None
+        result['slides'] = [dict(r) for r in con.execute('SELECT position,start,end,timestamp,content_kind FROM slides WHERE video_id=? ORDER BY position', (video_id,))]
         result['mentions'] = [dict(r) for r in con.execute('SELECT * FROM mentions WHERE video_id=?', (video_id,))]
         return result
 
@@ -182,8 +213,8 @@ def library(filters):
     return {'videos': videos, 'groups': groups, 'creators': creators, 'stats': stats, 'limit': 1000}
 
 
-def jobs():
-    with connect() as con:
+def _jobs(temporary=False):
+    with connect(temporary=temporary) as con:
         rows = con.execute("""WITH ranked AS (
             SELECT *, ROW_NUMBER() OVER (
                 PARTITION BY CASE WHEN kind='process' AND video_id IS NOT NULL THEN 'video:' || video_id ELSE 'job:' || id END
@@ -221,32 +252,58 @@ def jobs():
         return result
 
 
+@session_store.locked
+def jobs():
+    rows = {job['id']: job for temporary in stores() for job in _jobs(temporary)}
+    active = sorted((j for j in rows.values() if j['status'] in ('queued','running')),
+                    key=lambda j: (0 if j['status']=='running' else 1, j['created_at'], j['id']))
+    history = sorted((j for j in rows.values() if j['status'] not in ('queued','running')),
+                     key=lambda j: (j['updated_at'],j['created_at'],j['id']), reverse=True)[:100]
+    positions = {'discovery': 0, 'processing': 0}
+    for job in active:
+        if job['status'] == 'queued':
+            positions[job['lane']] += 1
+            job['queue_position'] = positions[job['lane']]
+    return active + history
+
+
+@session_store.locked
 def summary_ids(ids):
-    if not ids:
-        return set()
-    with connect() as con:
-        return {r[0] for r in con.execute('SELECT video_id FROM summaries WHERE video_id IN (' + ','.join('?' for _ in ids) + ')', ids)}
+    result = set()
+    if ids:
+        for temporary in stores():
+            with connect(temporary=temporary) as con:
+                result.update(r[0] for r in con.execute('SELECT video_id FROM summaries WHERE video_id IN (' + ','.join('?' for _ in ids) + ')', ids))
+    return result
 
 
+@session_store.locked
 def mark_library(video_id, source_url):
     """Save automatically discovered uploads from an already-saved subscription."""
     with connect() as con:
+        session_store.promote(con, config.DB, video_id)
         con.execute('INSERT OR IGNORE INTO library_items VALUES(?,?)', (video_id, now()))
         con.execute('INSERT OR IGNORE INTO library_links VALUES(?,?)', (source_url, video_id))
         search.sync(con, video_id)
+    session_store.forget_promoted(config.DB, [video_id])
 
 
+@session_store.locked
 def add_to_library(ids, source_url, is_feed):
     with connect() as con:
         con.execute('BEGIN IMMEDIATE')
         # Discovery previews are enough to save links; transcription is independent.
         previews = {}
-        for row in con.execute("SELECT result_json FROM jobs WHERE kind='discover' AND status='done' ORDER BY created_at DESC LIMIT 100"):
-            for video in json.loads(row[0] or '{}').get('videos', []):
-                previews.setdefault(video['id'], video)
+        for temporary in stores():
+            with connect(temporary=temporary) as lookup:
+                rows = lookup.execute("SELECT result_json FROM jobs WHERE kind='discover' AND status='done' ORDER BY created_at DESC LIMIT 100").fetchall()
+            for row in rows:
+                for video in json.loads(row[0] or '{}').get('videos', []):
+                    previews.setdefault(video['id'], video)
         added = linked = 0
         job_ids = []
         for ident in ids:
+            session_store.promote(con, config.DB, ident)
             url = f'https://www.youtube.com/watch?v={ident}'
             preview = previews.get(ident, {})
             con.execute('''INSERT OR IGNORE INTO videos(id,url,title,creator,channel_id,published_at,duration,metadata_json,created_at,updated_at)
@@ -257,7 +314,7 @@ def add_to_library(ids, source_url, is_feed):
             linked += con.execute('INSERT OR IGNORE INTO library_links VALUES(?,?)', (source_url, ident)).rowcount
             search.sync(con, ident)
             # Save and enqueue in one transaction so a crash cannot leave an unqueued link.
-            if not con.execute('SELECT 1 FROM summaries WHERE video_id=?', (ident,)).fetchone():
+            if not research_ready(con, ident):
                 active = con.execute("SELECT id FROM jobs WHERE kind='process' AND video_id=? AND status IN ('queued','running')", (ident,)).fetchone()
                 if active:
                     job_ids.append(active['id'])
@@ -278,9 +335,11 @@ def add_to_library(ids, source_url, is_feed):
             for ident in ids:
                 con.execute('INSERT OR IGNORE INTO source_videos VALUES(?,?,?)', (source_id, ident, now()))
             monitoring = bool(con.execute('SELECT enabled FROM sources WHERE url=?', (source_url,)).fetchone()[0])
+    session_store.forget_promoted(config.DB, ids)
     return {'job_ids': job_ids, 'saved': added, 'linked': linked, 'already_saved': len(ids) - linked, 'monitoring': monitoring if is_feed else False}
 
 
+@session_store.locked
 def delete_summary(video_id):
     """Remove a saved summary, retaining transcripts and feed deduplication history."""
     with connect() as con:
@@ -294,6 +353,7 @@ def delete_summary(video_id):
             con.execute(f'DELETE FROM {table} WHERE video_id=?', (video_id,))
         con.execute("UPDATE videos SET category='other',updated_at=? WHERE id=?", (now(), video_id))
         search.sync(con, video_id)
+        session_store.demote(con, config.DB, video_id)
     return {'ok': True}
 
 
@@ -305,3 +365,30 @@ def saved_sources(ids):
         for row in con.execute('SELECT video_id,source_url FROM library_links WHERE video_id IN (' + ','.join('?' for _ in ids) + ')', ids):
             result.setdefault(row['video_id'], []).append(row['source_url'])
         return result
+
+
+def save_slides(video_id, slides, minimum):
+    # Replace only after a complete scan; failed/restarted jobs retain previous results.
+    with connect(video_id=video_id) as con:
+        con.execute('DELETE FROM slides WHERE video_id=?', (video_id,))
+        con.executemany('INSERT INTO slides(video_id,position,start,end,timestamp,image,content_kind) VALUES(?,?,?,?,?,?,?)',
+                        [(video_id, i, s['start'], s['end'], s['timestamp'], s['image'], s.get('content_kind', 'unknown')) for i, s in enumerate(slides)])
+        con.execute('INSERT OR REPLACE INTO slide_scans VALUES(?,?,?)', (video_id, minimum, now()))
+
+
+def research_ready(con, video_id):
+    return bool(con.execute('SELECT 1 FROM summaries s JOIN slide_scans c ON c.video_id=s.video_id WHERE s.video_id=?',
+                            (video_id,)).fetchone())
+
+
+def summary_checkpoint(job_id, fingerprint, stage):
+    with connect(job_id=job_id) as con:
+        row = con.execute('SELECT result_json FROM summary_checkpoints WHERE job_id=? AND fingerprint=? AND stage=?',
+                          (job_id, fingerprint, stage)).fetchone()
+        return json.loads(row['result_json']) if row else None
+
+
+def save_summary_checkpoint(job_id, fingerprint, stage, result):
+    with connect(job_id=job_id) as con:
+        con.execute('INSERT OR REPLACE INTO summary_checkpoints VALUES(?,?,?,?,?)',
+                    (job_id, fingerprint, stage, dumps(result), now()))

@@ -296,7 +296,7 @@ class SummaryTests(unittest.TestCase):
         responses = [{'summary':'第一段摘要','category':'finance','mentions':[]},
                      {'summary':'第二段摘要','category':'finance','mentions':[]},
                      {'summary':'合并摘要'}]
-        with patch('app.summarize.chat', side_effect=responses) as chat:
+        with patch('app.summarize.input_budget', return_value=2450), patch('app.summarize.chat', side_effect=responses) as chat:
             result = summarize.summarize('zh', [{'start':0,'end':1,'text':'中'*1200}])
         self.assertEqual(chat.call_count, 3)
         self.assertEqual(result['summary'], '合并摘要')
@@ -441,6 +441,7 @@ class LibraryManagementTests(DatabaseCase):
         db.save_transcript(ident, 'zh', 'captions', [{'start': 0, 'text': 'NVDA'}])
         db.save_summary(ident, {'summary': '研究总结', 'category': 'finance', 'mentions': [
             {'ticker': 'NVDA', 'stance': 'mention', 'evidence': 'NVDA', 'timestamp': 0}]}, 'test')
+        db.save_slides(ident, [], 4)
         db.add_to_library([ident], source, feed)
 
     def test_grouped_and_ungrouped_with_filters(self):
@@ -508,6 +509,7 @@ class VideoDedupTests(DatabaseCase):
 
     def test_completed_summary_is_reused_and_regeneration_is_explicit(self):
         self.save()
+        db.save_slides(ID, [], 4)
         first = worker.enqueue('process', {}, ID)
         self.assertEqual(worker.enqueue('process', {}, ID), first)
         self.assertIsNone(worker.claim())
@@ -522,6 +524,7 @@ class VideoDedupTests(DatabaseCase):
 
     def test_deleted_summary_is_not_reused(self):
         self.save()
+        db.save_slides(ID, [], 4)
         old = worker.enqueue('process', {}, ID)
         db.delete_summary(ID)
         new = worker.enqueue('process', {}, ID)
@@ -578,6 +581,7 @@ class RepeatedSummarizeTests(DatabaseCase):
         for _ in range(3):
             status, _ = self.call('POST', '/api/process', {'ids': [ID]})
             self.assertEqual(status, '200 OK')
+        self.assertEqual(worker.claim()['kind'], 'process')
         self.assertIsNone(worker.claim())
         self.assertEqual(len(db.jobs()), 1)
         self.assertEqual(db.detail(ID)['summary']['markdown'], '现有总结')
@@ -733,7 +737,8 @@ class SerializedChunkTests(unittest.TestCase):
         batches = list(summarize.chunks(segments))
         self.assertGreater(len(batches), 1)
         self.assertTrue(all(len(summarize.serialize_segments(b).encode('utf-8')) <= 2400 for b in batches))
-        self.assertEqual([s for b in batches for s in b], segments)
+        self.assertEqual([{k:v for k,v in s.items() if k != 'segment_id'} for b in batches for s in b], segments)
+        self.assertEqual([s['segment_id'] for b in batches for s in b], list(range(len(segments))))
 
     def test_long_segment_unicode_and_json_escapes_preserved(self):
         text = '中文😀"\\\n' * 1200
@@ -793,7 +798,7 @@ class MergeValidationTests(unittest.TestCase):
             {}, {'summary': '合并后的中文摘要'},
         ]
         stages = []
-        with patch('app.summarize.chat', side_effect=responses) as chat:
+        with patch('app.summarize.input_budget', return_value=2450), patch('app.summarize.chat', side_effect=responses) as chat:
             result = summarize.summarize('zh', [{'start': 0, 'text': '中' * 1200}], stages.append)
         self.assertEqual(result['summary'], '合并后的中文摘要')
         self.assertEqual(chat.call_count, 4)
@@ -830,6 +835,7 @@ class LibraryAutoSummaryTests(DatabaseCase):
         with db.connect() as con:
             con.execute("UPDATE jobs SET status='done' WHERE id=?", (ident,))
         db.save_summary(ID, {'summary': '中文总结', 'category': 'other', 'mentions': []}, 'test')
+        db.save_slides(ID, [], 4)
         self.assertEqual(db.add_to_library([ID], URL, False)['job_ids'], [])
         self.assertIsNone(worker.claim())
 
@@ -902,7 +908,7 @@ class TranscriptLanguageRepairTests(DatabaseCase):
         video['metadata'] = {'language': 'en-US'}
         db.save_video(video)
         db.save_transcript(ID, 'ar', 'youtube_original_captions', [{'start': 0, 'text': 'نص'}])
-        with patch('app.media.video_info', return_value={'id': ID, 'title': 'English video', 'language': 'en-US'}), patch('app.media.transcribe', return_value=('en-US', 'youtube_original_captions', [{'start': 0, 'text': 'Original English speech'}])) as transcribe, patch('app.summarize.summarize', return_value={'summary': 'English summary', 'category': 'other', 'mentions': []}) as summary:
+        with patch('app.media.video_info', return_value={'id': ID, 'title': 'English video', 'language': 'en-US'}), patch('app.media.transcribe', return_value=('en-US', 'youtube_original_captions', [{'start': 0, 'text': 'Original English speech'}])) as transcribe, patch('app.summarize.summarize', return_value={'summary': 'English summary', 'category': 'other', 'mentions': []}) as summary, patch('app.slides.extract', return_value=[]):
             worker.process({'id': 'test', 'kind': 'process', 'video_id': ID, 'payload_json': '{"force":true}'})
         transcribe.assert_called_once()
         self.assertEqual(summary.call_args.args[0], 'en-US')

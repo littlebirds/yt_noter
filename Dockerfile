@@ -3,7 +3,7 @@ FROM python:3.12-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     DATA_DIR=/data HF_HOME=/cache/huggingface XDG_CACHE_HOME=/cache
 COPY --from=javascript /usr/local/bin/node /usr/local/bin/node
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libgomp1 ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libgomp1 ca-certificates tesseract-ocr tesseract-ocr-eng tesseract-ocr-chi-sim tesseract-ocr-chi-tra \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 app \
     && mkdir -p /data /cache && chown -R app:app /data /cache

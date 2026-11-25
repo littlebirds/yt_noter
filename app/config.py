@@ -9,3 +9,6 @@ LLM_MODEL = os.getenv('LLM_MODEL', 'qwen2.5-3b-instruct-q4_k_m')
 WHISPER_MODEL = os.getenv('WHISPER_MODEL', 'small')
 WHISPER_DEVICE = os.getenv('WHISPER_DEVICE', 'cpu')
 MAX_DISCOVERY = 500
+
+# Must not exceed the context configured on the inference server.
+LLM_CONTEXT_TOKENS = int(os.getenv('LLM_CONTEXT_TOKENS', '8192'))

@@ -224,11 +224,25 @@ function renderJobs() {
  $$('[data-retry]').forEach(button=>button.addEventListener('click',handle(async()=>{button.disabled=true; try {const result=await request('/api/retry',{id:button.dataset.retry}); const job=jobs.find(j=>j.id===button.dataset.retry); if(job.kind==='discover') {activeDiscovery=result.job_id;sessionStorage.setItem('frame-discovery',activeDiscovery);$('#discover-button').disabled=true;} await poll();} finally {button.disabled=false;}})));
  $$('[data-open]').forEach(button=>button.addEventListener('click',handle(()=>openVideo(button.dataset.open))));
 }
+Object.assign(en,{saveDraft:'Add to Library',draftNotice:'Temporary research. Save to Library to keep it after the app restarts.',sessionExpired:'The app restarted. Unsaved research and jobs have expired; your Library is preserved.',queueIntro:'One job at a time. Unsaved work lasts until the app restarts; Library jobs survive restarts.',summaryDeleted:'Removed from Library. Retained transcript and slides are temporary until the app restarts.'});
+Object.assign(zh,{saveDraft:'加入资料库',draftNotice:'临时研究。加入资料库后，应用重启仍可保留。',sessionExpired:'应用已重启，未保存的研究和任务已过期，资料库仍保留。',queueIntro:'串行处理。未保存的任务仅保留到应用重启；资料库任务可在重启后恢复。',summaryDeleted:'已从资料库移除，保留的原文和幻灯片仅在应用重启前可用。'});
+let serverSession = sessionStorage.getItem('frame-server-session');
+function acceptServerSession(ident) {
+ if(!ident)return;
+ const changed=serverSession && serverSession!==ident;
+ serverSession=ident;sessionStorage.setItem('frame-server-session',ident);
+ if(!changed)return;
+ releaseDiscovery();discovery=[];discoveryResult=null;discoverySince=null;selected.clear();jobs=[];video=null;++slideRequest;
+ $('#discovery').hidden=true;$('#discovery-list').innerHTML='';$('#detail-content').innerHTML='';$('#detail-header').innerHTML='';
+ if(currentView==='detail')showView('discover');
+ updateSelected();notify(t('sessionExpired'));
+}
 async function poll() {
  if(polling) return; polling=true;
- try { const data=await request('/api/jobs'); const old=jobs; jobs=data.jobs;$('#queue-status').textContent=t('queueLive');for(const item of discovery) {if(jobs.some(j=>j.video_id===item.id && j.kind==='process' && j.status==='done'))item.summary_ready=true;} renderJobs();updateSelected(); if(currentView==='feeds') await loadFeeds();
+ try { const data=await request('/api/jobs'); acceptServerSession(data.session_id); const old=jobs; jobs=data.jobs;$('#queue-status').textContent=t('queueLive');for(const item of discovery) {if(jobs.some(j=>j.video_id===item.id && j.kind==='process' && j.status==='done'))item.summary_ready=true;} renderJobs();updateSelected(); if(currentView==='feeds') await loadFeeds();
    if(activeDiscovery) {const job=jobs.find(j=>j.id===activeDiscovery) || await request('/api/jobs/'+activeDiscovery); if(job?.status==='queued' || job?.status==='running') lookupStatus(job.status==='queued' ? t('lookupQueued') : `${t('lookupRunning')} ${job.progress || ''}`); if(job?.status==='done') {lookupStatus(t('lookupDone'));acceptDiscoveryPage(job.result); activeDiscovery=null;sessionStorage.removeItem('frame-discovery');$('#discover-button').disabled=false;applySelection();renderDiscovery();if(currentView==='discover') $('#discovery').scrollIntoView({behavior:'smooth'});} else if(job?.status==='failed') {lookupStatus(`${t('lookupFailed')} ${job.error || ''}`,true);notify(job.error,true);activeDiscovery=null;sessionStorage.removeItem('frame-discovery');$('#discover-button').disabled=false;$('#load-more').disabled=false;}}
    const finished=jobs.filter(j=>j.status==='done' && old.some(o=>o.id===j.id && o.status!=='done'));
+   if(currentView==='detail' && activeTab==='slides' && jobs.some(j=>['process','slides'].includes(j.kind) && j.video_id===video?.id && j.status==='failed' && old.some(o=>o.id===j.id && o.status!=='failed')))renderDetail();
    if(finished.some(j=>j.video_id)) {if(discoveryResult)renderDiscovery();await loadLibrary(); if(currentView==='detail' && finished.some(j=>j.video_id===video?.id)) await openVideo(video.id,false);}
  } catch(error) {
   $('#queue-status').textContent=t('queueOffline');
@@ -237,7 +251,7 @@ async function poll() {
   throw error;
  } finally {polling=false;}
 }
-async function openVideo(id, changeView=true) { video=await request('/api/videos/'+encodeURIComponent(id)); if(changeView) {activeTab='summary';showView('detail');} renderDetail(); }
+async function openVideo(id, changeView=true) { if(changeView || video?.id!==id)slideIndex=0;video=await request('/api/videos/'+encodeURIComponent(id)); if(changeView) {activeTab='summary';showView('detail');} renderDetail(); }
 function inlineMarkdown(text) {return esc(text).replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\[([^\]]+)\]\((https:\/\/[^\s<]+)\)/g,'<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');}
 function markdown(text) {
  const lines=text.split('\n');let output='',list=false,table=false;
@@ -249,11 +263,48 @@ function markdown(text) {
  }
  return output+(list?'</ul>':'')+(table?'</table>':'');
 }
+Object.assign(en,{process:'Transcribe, summarize & capture slides',slideFirst:'Beginning',slidePrevious:'Back',slideNext:'Forward',slideLast:'End',slides:'Slides',slideKindTable:'Table',slideKindChart:'Chart / graph',slideKindList:'Bulleted / numbered list',scanSlides:'Scan slides',slideMinimum:'Minimum stable seconds',slideHelp:'Capture tables (2×2 or larger), charts/graphs, and lists with at least 3 bulleted or numbered items. Content must stay stable. Chat/comment screens are excluded heuristically.',noSlides:'No stable slide candidates found.',slidesUnscanned:'Scan this video to find slides.',slideScrub:'Scrub slides',slideImage:'Slide from the original video',slideLoading:'Loading slide…'});
+Object.assign(zh,{process:'转录、总结与捕获幻灯片',slideFirst:'第一张',slidePrevious:'上一张',slideNext:'下一张',slideLast:'最后一张',slides:'幻灯片',slideKindTable:'表格',slideKindChart:'图表',slideKindList:'项目符号 / 编号列表',scanSlides:'扫描幻灯片',slideMinimum:'最短稳定秒数',slideHelp:'捕获至少 2×2 的表格、图表，以及至少 3 项的项目符号或编号列表。内容须保持稳定，通过启发式规则过滤聊天与评论界面。',noSlides:'未找到稳定的幻灯片候选。',slidesUnscanned:'扫描此视频以查找幻灯片。',slideScrub:'浏览幻灯片',slideImage:'原视频幻灯片',slideLoading:'正在加载幻灯片…'});
+let slideRequest = 0, slideIndex = 0;
+async function showSlide(index) {
+ const count=video?.slides?.length || 0;if(!count || !Number.isFinite(index))return;
+ index=Math.max(0,Math.min(count-1,Math.trunc(index)));slideIndex=index;
+ const slide=video.slides[index];
+ $('#slide-first').disabled=$('#slide-previous').disabled=index===0;
+ $('#slide-next').disabled=$('#slide-last').disabled=index===count-1;
+ const ident=video.id, version=++slideRequest;
+ const kindKey={table:'slideKindTable',chart:'slideKindChart',list:'slideKindList'}[slide.content_kind];
+ $('#slide-position').textContent=`${kindKey ? t(kindKey)+' · ' : ''}${index+1} / ${video.slides.length} · ${clock(slide.start)} – ${clock(slide.end)}`;
+ $('#slide-original').href=`${video.url}&t=${Math.floor(slide.timestamp)}s`;
+ $('#slide-image').hidden=true;$('#slide-message').textContent=t('slideLoading');
+ try {
+  const result=await request(`/api/slides/${encodeURIComponent(ident)}/${slide.position}`);
+  if(version!==slideRequest || activeTab!=='slides' || video?.id!==ident)return;
+  $('#slide-image').src=result.image;$('#slide-image').hidden=false;$('#slide-message').textContent='';
+ } catch(error) {if(version===slideRequest && activeTab==='slides' && video?.id===ident)$('#slide-message').textContent=error.message;}
+}
+function renderSlides(content) {
+ const items=video.slides || [], busy=jobs.some(j=>['process','slides'].includes(j.kind) && j.video_id===video.id && ['queued','running'].includes(j.status));
+ content.innerHTML=`<p class="muted">${esc(t('slideHelp'))}</p><form id="slide-form" class="detail-actions"><label>${esc(t('slideMinimum'))} <input id="slide-minimum" type="number" min="1" max="60" step="1" value="${video.slide_scan?.minimum || 4}" required></label><button class="secondary" ${busy?'disabled':''}>${esc(t(busy?'queued':'scanSlides'))}</button></form>`+
+ (items.length ? `<div class="slide-viewer"><div class="slide-controls" role="group" aria-label="${esc(t('slideScrub'))}">${[['first','⏮','slideFirst'],['previous','◀','slidePrevious'],['next','▶','slideNext'],['last','⏭','slideLast']].map(([id,icon,label])=>`<button type="button" class="secondary" id="slide-${id}" aria-label="${esc(t(label))}" title="${esc(t(label))}">${icon}<span>${esc(t(label))}</span></button>`).join('')}</div><p id="slide-position"></p><p id="slide-message" role="status"></p><img id="slide-image" alt="${esc(t('slideImage'))}" hidden><a id="slide-original" target="_blank" rel="noopener noreferrer">${esc(t('watchOriginal'))}</a></div>` : empty(t(video.slide_scan?'noSlides':'slidesUnscanned')));
+ $('#slide-form').addEventListener('submit',handle(async event=>{
+  event.preventDefault();const button=$('#slide-form button');button.disabled=true;
+  try {await request('/api/slides',{id:video.id,minimum:Number($('#slide-minimum').value)});notify(t('addedQueue'));await poll();if(activeTab==='slides')renderDetail();}
+  finally {button.disabled=false;}
+ }));
+ if(items.length){
+  for(const [id,target] of [['first',()=>0],['previous',()=>slideIndex-1],['next',()=>slideIndex+1],['last',()=>items.length-1]])$('#slide-'+id).addEventListener('click',()=>showSlide(target()));
+  showSlide(Math.min(slideIndex,items.length-1));
+ }
+}
 function renderDetail() {
+ $('#save-draft').hidden=!!video.saved;$('#draft-notice').hidden=!!video.saved;$('#draft-notice').textContent=t('draftNotice');
  $('#detail-header').innerHTML=`<h1>${esc(video.title)}</h1><div class="video-meta">${esc(video.creator)} · ${esc(dateLabel(video.published_at))} · ${esc(video.language || '—')} <span class="badge">${esc(t(video.category))}</span></div>`;
  $('#watch-video').href=video.url;
  $$('.tab').forEach(button=>button.classList.toggle('active',button.dataset.tab===activeTab));
  const content=$('#detail-content');
+ ++slideRequest;
+ if(activeTab==='slides')renderSlides(content);
  if(activeTab==='summary')content.innerHTML=video.summary ? `<div class="prose">${markdown(video.summary.markdown)}</div><p class="muted">${esc(video.summary.model)} · ${esc(dateLabel(video.summary.created_at))}</p>` : empty(t('noSummary'));
  if(activeTab==='transcript')content.innerHTML=video.transcript ? `<p class="muted">${esc(t('source'))}: ${esc(video.transcript.source)} · ${esc(video.transcript.language)}</p>`+video.transcript.segments.map(s=>`<div class="transcript-line"><a href="${esc(video.url)}&t=${Math.floor(s.start)}s" target="_blank" rel="noopener noreferrer">${clock(s.start)}</a><span>${esc(s.text)}</span></div>`).join('') : empty(t('noTranscript'));
  if(activeTab==='mentions')content.innerHTML=`<p class="muted">${esc(t('mentionNote'))}</p>`+(video.mentions.length ? video.mentions.map(m=>`<div class="mention"><strong>${esc(m.ticker)}</strong> <span class="badge">${esc(t(m.stance))}</span><a href="${esc(video.url)}&t=${Math.floor(m.timestamp)}s" target="_blank" rel="noopener noreferrer">${clock(m.timestamp)}</a><blockquote>${esc(m.evidence)}</blockquote></div>`).join('') : empty(t('noMentions')));
@@ -261,6 +312,11 @@ function renderDetail() {
 
 $$('[data-tab]').forEach(button=>button.addEventListener('click',()=>{activeTab=button.dataset.tab;renderDetail();}));
 $('#back-library').addEventListener('click',()=>showView('library'));
+$('#save-draft').addEventListener('click',handle(async()=>{
+ const id=video.id,url=video.url,button=$('#save-draft');button.disabled=true;
+ try {await request('/api/library',{ids:[id],url});await openVideo(id,false);await loadLibrary();await poll();notify(t('savedLibrary'));}
+ finally {button.disabled=false;}
+}));
 $('#retry-summary').addEventListener('click',handle(async()=>{await request('/api/process',{ids:[video.id],force:true});notify(t('addedQueue'));await poll();}));
 $('#export-video').addEventListener('click',handle(async()=>{const response=await request('/api/export/'+video.id,undefined,true);const url=URL.createObjectURL(await response.blob());const a=document.createElement('a');a.href=url;a.download=video.id+'.md';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}));
 async function loadStatus(){statusData=await request('/api/status');renderStatus();}

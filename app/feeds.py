@@ -143,7 +143,7 @@ def sync(source_id, progress):
                 continue
             with db.connect() as con:
                 known = con.execute('SELECT 1 FROM source_videos WHERE source_id=? AND video_id=?', (source_id, video['id'])).fetchone()
-                complete = con.execute('SELECT 1 FROM summaries WHERE video_id=?', (video['id'],)).fetchone()
+                complete = db.research_ready(con, video['id'])
             with db.connect() as con:
                 active = con.execute('SELECT enabled FROM sources WHERE id=?', (source_id,)).fetchone()
             if not active or not active['enabled']:

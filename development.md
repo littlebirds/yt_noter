@@ -14,7 +14,7 @@ make local-inference
 make local
 ```
 
-Open http://127.0.0.1:8000. Logs appear in the terminal. Ctrl+C stops the backend and its child processes. `make local-run` starts without a watcher for debugging. Saving Python files restarts the whole backend, including workers; interrupted jobs resume from persisted state. Static HTML/CSS/JS edits need only a browser refresh. After dependency changes, stop the app, run `make local-setup`, then restart. No app image rebuild is needed.
+Open http://127.0.0.1:8000. Logs appear in the terminal. Ctrl+C stops the backend and its child processes. `make local-run` starts without a watcher for debugging. Saving Python files restarts the whole backend, including workers. Unsaved research expires; Library jobs resume from persisted state. Static HTML/CSS/JS edits need only a browser refresh. After dependency changes, stop the app, run `make local-setup`, then restart. No app image rebuild is needed.
 
 ### Keep the existing Docker library
 
@@ -112,7 +112,7 @@ This replaces the model server and temporarily interrupts inference. The model d
 
 ## Jobs and persistent data
 
-The whole app container restarts so the old background worker exits before the new worker resumes interrupted jobs. A running transcription or summary can restart from its last saved stage. Saved transcripts, summaries, subscriptions, and queued jobs remain in the `library` volume. Speech model downloads remain in `speech-models`.
+The whole app container restarts so the old worker exits before the new worker resumes saved Library jobs. Unsaved drafts, discovery results, jobs and checkpoints live only in memory and expire on every app restart, including Python auto-reload. Use **Add to Library** before restarting to keep research and its active job. Saved transcripts, summaries, slides, subscriptions and queued jobs remain in the `library` volume; speech model downloads remain in `speech-models`.
 
 Development and production use the **same volumes** with these commands. Development processing therefore updates the same research library. Do not use `docker compose down -v` as a rebuild step: it deletes the declared data volumes.
 

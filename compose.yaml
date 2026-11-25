@@ -10,6 +10,7 @@ services:
       HF_HOME: /cache/huggingface
       LLM_URL: http://inference:8080
       LLM_MODEL: ${LLM_MODEL:-qwen2.5-3b-instruct-q4_k_m}
+      LLM_CONTEXT_TOKENS: ${LLM_CONTEXT_TOKENS:-8192}
       WHISPER_MODEL: ${WHISPER_MODEL:-small}
       WHISPER_DEVICE: cpu
       FEED_POLL_MINUTES: ${FEED_POLL_MINUTES:-15}
@@ -48,7 +49,7 @@ services:
       - --alias
       - ${LLM_MODEL:-qwen2.5-3b-instruct-q4_k_m}
       - --ctx-size
-      - "8192"
+      - "${LLM_CONTEXT_TOKENS:-8192}"
       - --parallel
       - "1"
       - --n-gpu-layers
