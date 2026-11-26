@@ -17,7 +17,7 @@ The stack contains:
 - **app:** Python WSGI API, a browser frontend with no build step, a serial processing worker, and a separate interactive discovery worker. Runs as a non-root user with Gunicorn.
 - **inference:** CPU-only llama.cpp server running **Qwen2.5 3B Instruct, Q4_K_M**. `Dockerfile.inference` embeds the specific GGUF file (about 2.1 GB), pinned to an upstream revision and checked against its published SHA-256. The container loads `/models/qwen2.5-3b-instruct-q4_k_m.gguf` from its read-only image filesystem, with no runtime model download or model volume. One inference slot and an 8,192-token context keep resource use bounded.
 
-Named volumes preserve SQLite (`library`) and speech models (`speech-models`). `docker compose down` retains them; **`down -v` deletes them**. CPU inference can be slow; start with an 8–16 GB RAM budget and measure actual memory and throughput on your server. These are planning estimates, not benchmarks.
+Named volumes preserve local app settings and SQLite (`library`) and speech models (`speech-models`). `docker compose down` retains them; **`down -v` deletes them**. CPU inference can be slow; start with an 8–16 GB RAM budget and measure actual memory and throughput on your server. These are planning estimates, not benchmarks.
 
 The web port is bound to host loopback. For remote use, place it behind your HTTPS reverse proxy, preserve the incoming Host header, and configure `AUTH_TOKEN`. The inference service is only exposed inside the Compose network. This is a single-user/shared-library app, not a multi-tenant service.
 
@@ -71,7 +71,7 @@ Ordinary YouTube playback ads generally are not part of downloaded source media.
 
 ## Search and stock research
 
-Search Chinese/English transcript and summary text, or filter by exact ticker, creator, category, and publication dates. Text search preserves literal substring matching using SQLite FTS5 trigram indexes for queries of three or more characters. One- and two-character queries use an indexed character/bigram lookup, including short Chinese terms. Only index-matched candidates undergo literal text verification; structured fields are also indexed. Results are capped at 1,000 per query—narrow dates for large archives.
+Search Chinese/English transcript and summary text, or filter by exact ticker, creator, category, and publication dates. Both storage engines use literal substring matching. SQLite uses FTS5 trigram and short-term indexes. PostgreSQL searches saved text directly, so text queries can take longer in large libraries. Results are capped at 1,000 per query.
 
 Stock mentions store the symbol, model-classified stance, exact source quote, timestamp, and optional source-supported target/currency/horizon fields. Symbols must literally appear in the evidence segment; company-to-ticker inference is intentionally absent. A mention is not necessarily a recommendation. Historical return calculations, corporate-action-adjusted prices, exchange normalization, OCR, and recommendation verification are **not implemented**. The schema retains provenance and extension JSON so those features can be added later.
 
@@ -88,7 +88,8 @@ Markdown exports contain summaries, stock mentions, and timestamped transcript l
 | `FEED_POLL_MINUTES` | `15` | Minimum interval between completed monitoring scans. |
 | `AUTH_TOKEN` | empty | Shared API bearer token; browser stores it only in session storage. |
 | `PORT` | `8000` | Loopback web port. |
-| `DATA_DIR` | `./data` locally | SQLite storage; `/data` in Docker. |
+| `DATA_DIR` | `./data` locally | Local app settings and SQLite storage; `/data` in Docker. |
+| `DATABASE_URL` | empty | The Library uses SQLite when empty. Set a PostgreSQL URL to store it on a database server. |
 | `LLM_URL` | `http://127.0.0.1:8080` locally | llama-server base URL without `/v1`; Compose uses `http://inference:8080`. |
 | `YOUTUBE_COOKIES` | unset | Optional server-side Netscape cookie file for restricted YouTube sessions. |
 
@@ -96,7 +97,22 @@ For cookies, mount a private cookie file into the app container with write acces
 
 `/healthz` checks HTTP availability; **Settings** checks installed tools and the served model alias. These do not guarantee YouTube access or downloadable speech weights. Use `docker compose logs -f app` to diagnose runtime failures. Update yt-dlp by rebuilding with `docker compose build --pull --no-cache app`; YouTube compatibility changes frequently. Dependency ranges and moving image tags are supplied for bootstrap, not a frozen production release: pin validated versions/digests after acceptance testing.
 
-Back up the `library` volume while the app is stopped, or use SQLite's online backup API. Retain `library.sqlite3-wal` with the database if copying a live volume without the backup API. Keep one app replica and **one Gunicorn worker process**; multiple processes would compete for the embedded scheduler. Larger deployments should move scheduling to a dedicated worker service and storage to PostgreSQL.
+Keep one app replica and **one Gunicorn worker process**. Multiple processes would compete for the embedded scheduler. For SQLite, back up the `library` volume with the app stopped or use SQLite's online backup API. For PostgreSQL, back up the database with `pg_dump` and keep backing up the local `library` volume for app settings.
+
+### Store the Library in PostgreSQL
+
+Use a dedicated database owned by the app login so the app can create and upgrade its tables. In the private `.env` used by Compose, set `DATABASE_URL=postgresql://appuser:PASSWORD@NAS_IP:5432/appdb`. Percent-encode reserved characters in the password. For a native Python launch, export `DATABASE_URL` in the shell before starting the app. Leave the variable empty to use SQLite.
+
+To start an empty Library, run `docker compose up -d --build` after setting the URL. For an existing SQLite Library in the Compose volume, stop the app and import it before starting the PostgreSQL-backed app.
+
+```sh
+docker compose stop app
+docker compose build app
+docker compose run --rm --no-deps app python -m app.migrate_library
+docker compose up -d
+```
+
+For a native install, install the updated requirements and run `python -m app.migrate_library --source /path/to/library.sqlite3` with `DATABASE_URL` exported. The importer copies saved videos, transcripts, summaries, mentions, slide images, feed history, and saved jobs and checkpoints in one PostgreSQL transaction. It requires an empty destination and leaves the SQLite file intact. Verify the Library after switching before archiving the old database.
 
 ## Local container development with automatic reload
 
@@ -125,9 +141,9 @@ node --test tests/frontend.test.cjs
 docker compose config --quiet
 ```
 
-Tests use temporary SQLite databases and mocked media/model adapters. They cover language selection, timestamp evidence, request validation, restart recovery, persistent monitoring and backfill, exports, and UI selection/rendering helpers. They do not replace an end-to-end deployment test with a real YouTube video and downloaded models.
+Tests use temporary SQLite databases and mocked media/model adapters. They cover language selection, timestamp evidence, request validation, restart recovery, persistent monitoring and backfill, exports, and UI selection/rendering helpers. Set `TEST_POSTGRES_URL` to a disposable PostgreSQL database whose login can create schemas to also test PostgreSQL storage and the SQLite importer.
 
-Implementation: `app/media.py` handles YouTube/ASR; `app/summarize.py` handles inference and validation; `app/db.py` owns storage; `app/feeds.py` owns subscriptions; `app/worker.py` runs temporary draft jobs and persistent Library/feed jobs; `app/server.py` serves the API; `static/` holds the UI. The disk SQLite database stores saved Library metadata, transcripts, summaries, slides, source-backed mentions, jobs and feed checkpoints. Unsaved research uses a separate in-memory store. Version markers prepare for future explicit schema migrations.
+Implementation: `app/media.py` handles YouTube/ASR; `app/summarize.py` handles inference and validation; `app/db.py` owns storage; `app/feeds.py` owns subscriptions; `app/worker.py` runs temporary draft jobs and persistent Library/feed jobs; `app/server.py` serves the API; `static/` holds the UI. The configured database stores saved Library metadata, transcripts, summaries, slides, source-backed mentions, jobs and feed checkpoints. Unsaved research uses a separate in-memory store. Version markers track schema migrations.
 
 Upstream references: [yt-dlp JavaScript runtime requirements](https://github.com/yt-dlp/yt-dlp/wiki/EJS), [faster-whisper CPU inference](https://github.com/SYSTRAN/faster-whisper), [llama.cpp Docker](https://github.com/ggml-org/llama.cpp/blob/master/docs/docker.md), [llama-server API](https://github.com/ggml-org/llama.cpp/tree/master/tools/server).
 
@@ -144,7 +160,7 @@ For debugging without an app container, use `make local-setup` and `make local`.
 
 Channel monitoring uses YouTube's public Atom feed once the channel ID is resolved. Routine checks default to 15 minutes; full yt-dlp reconciliation runs every 6 hours (`FEED_RECONCILE_HOURS`). Initial backfills, unfinished pages, feed failures, and gaps of at least an hour (or three configured polling intervals, whichever is larger) use listing scans. RSS checks never advance the historical listing checkpoint. Playlists and channels without a resolved channel ID continue using yt-dlp. Both paths deduplicate by video ID and retain already-seen history. Existing explicit polling settings remain effective; set `FEED_POLL_MINUTES=15` to adopt the new interval.
 
-Search schema migration 5 builds indexes for existing Library entries on startup. Inserts, transcript/summary replacements, and Library removal maintain the indexes in the same transaction. No external search service or Python package is required; SQLite must support FTS5 with its trigram tokenizer. Indexes use additional disk space and initial migration takes time proportional to saved content. Common one-character searches can still match many videos; use longer text or filters for selective results.
+On SQLite, search schema migration 5 builds indexes for existing Library entries on startup. Inserts, transcript/summary replacements, and Library removal maintain the indexes in the same transaction. SQLite must support FTS5 with its trigram tokenizer. Indexes use additional disk space and initial migration takes time proportional to saved content. Common one-character searches can still match many videos; use longer text or filters for selective results.
 
 ### Configure the LLM in the app
 
@@ -266,7 +282,7 @@ auto-reloader ends the session and clears all unsaved transcripts, summaries, sl
 discovery results, jobs, and summary checkpoints. Pasting an unsaved video again in the
 next session can therefore start fresh. Model caches and server settings remain persistent.
 
-Unsaved research is held in an in-memory SQLite store, never in `library.sqlite3`.
+Unsaved research is held in an in-memory SQLite store.
 Click **Add to Library** from discovery or a video's detail page to persist its current
 results and active jobs. Promotion is atomic and does not rerun completed work. If a
 worker is already processing it, subsequent results/checkpoints go to the saved Library.

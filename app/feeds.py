@@ -3,7 +3,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from . import db, media, channel_feed
+from . import db, media, channel_feed, storage
 
 POLL_MINUTES = max(5, int(os.getenv('FEED_POLL_MINUTES', '15')))
 PAGE_SIZE = 25
@@ -27,12 +27,12 @@ def timestamp(value):
 def subscribe(url, since):
     since = timestamp(since)
     with db.connect() as con:
-        con.execute('BEGIN IMMEDIATE')
+        storage.begin_write(con)
         row = con.execute('SELECT * FROM sources WHERE url=?', (url,)).fetchone()
         if row:
             # Re-pasting a feed never moves its lower bound forward and skips history.
             if since < row['since']:
-                active = con.execute("SELECT 1 FROM jobs WHERE kind='sync' AND status IN ('queued','running') AND json_extract(payload_json,'$.source_id')=?", (row['id'],)).fetchone()
+                active = con.execute(f"SELECT 1 FROM jobs WHERE kind='sync' AND status IN ('queued','running') AND {storage.job_source(con)}=?", (row['id'],)).fetchone()
                 if active:
                     raise ValueError('This feed is currently scanning. Wait for it to finish before extending its history.')
                 con.execute('UPDATE sources SET since=?,checkpoint=NULL,cursor=0,scan_started=NULL,next_scan=? WHERE id=?', (since, db.now(), row['id']))
@@ -57,15 +57,15 @@ def update_source(ident, enabled):
         if not result.rowcount:
             raise LookupError('Feed not found.')
         if not enabled:
-            con.execute("UPDATE jobs SET status='cancelled',progress='Monitoring stopped',updated_at=? WHERE kind='sync' AND status='queued' AND json_extract(payload_json,'$.source_id')=?", (db.now(), ident))
+            con.execute(f"UPDATE jobs SET status='cancelled',progress='Monitoring stopped',updated_at=? WHERE kind='sync' AND status='queued' AND {storage.job_source(con)}=?", (db.now(), ident))
 
 
 def schedule():
     # Queue insertion and duplicate checks are atomic, including restarts.
     with db.connect() as con:
-        con.execute('BEGIN IMMEDIATE')
+        storage.begin_write(con)
         for source in con.execute('SELECT * FROM sources WHERE enabled=1 AND next_scan<=?', (db.now(),)).fetchall():
-            active = con.execute("SELECT 1 FROM jobs WHERE kind='sync' AND status IN ('queued','running') AND json_extract(payload_json,'$.source_id')=?", (source['id'],)).fetchone()
+            active = con.execute(f"SELECT 1 FROM jobs WHERE kind='sync' AND status IN ('queued','running') AND {storage.job_source(con)}=?", (source['id'],)).fetchone()
             if active:
                 continue
             ident = uuid.uuid4().hex
@@ -156,7 +156,7 @@ def sync(source_id, progress):
                     enqueue('process', {}, video['id'])
                     queued += 1
                 with db.connect() as con:
-                    con.execute('INSERT OR IGNORE INTO source_videos VALUES(?,?,?)', (source_id, video['id'], db.now()))
+                    con.execute('INSERT INTO source_videos VALUES(?,?,?) ON CONFLICT DO NOTHING', (source_id, video['id'], db.now()))
         if incomplete:
             raise RuntimeError('Readable videos were queued, but some metadata is unavailable. This page will retry without advancing its checkpoint. Check discovery warnings for details.')
         oldest = min((datetime.fromisoformat(v['published_at']) + (timedelta(days=1) if v.get('metadata', {}).get('date_precision') == 'day' else timedelta()) for v in result['videos']), default=None)

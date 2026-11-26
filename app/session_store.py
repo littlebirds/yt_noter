@@ -8,12 +8,16 @@ import threading
 import uuid
 from contextlib import closing, contextmanager
 from functools import wraps
+from . import config, search, storage
 
 LOCK = threading.RLock()
 _memory = None
 _database = None
 _session_id = None
 VIDEO_TABLES = ('transcripts', 'summaries', 'mentions', 'slide_scans', 'slides')
+PRIMARY_KEYS = {'videos': ('id',), 'transcripts': ('video_id',), 'summaries': ('video_id',),
+                'slide_scans': ('video_id',), 'slides': ('video_id', 'position'),
+                'jobs': ('id',), 'summary_checkpoints': ('job_id', 'fingerprint', 'stage')}
 
 
 def locked(function):
@@ -43,10 +47,11 @@ def end():
 @contextmanager
 def connection(database, video_id=None, job_id=None, temporary=False):
     with LOCK:
-        disk = sqlite3.connect(database, timeout=30)
-        disk.row_factory = sqlite3.Row
-        disk.execute('PRAGMA foreign_keys=ON')
-        try:
+        if active(database) and temporary and video_id is None and job_id is None:
+            with _memory:
+                yield _memory
+            return
+        with storage.persistent_connection(database) as disk:
             use_memory = False
             if active(database):
                 use_memory = temporary
@@ -55,11 +60,11 @@ def connection(database, video_id=None, job_id=None, temporary=False):
                 if job_id is not None:
                     use_memory = (not disk.execute('SELECT 1 FROM jobs WHERE id=?', (job_id,)).fetchone()
                                   and bool(_memory.execute('SELECT 1 FROM jobs WHERE id=?', (job_id,)).fetchone()))
-            con = _memory if use_memory else disk
-            with con:
-                yield con
-        finally:
-            disk.close()
+            if use_memory:
+                with _memory:
+                    yield _memory
+            else:
+                yield disk
 
 
 def _copy_rows(source, target, table, condition, params, omit=()):
@@ -67,8 +72,18 @@ def _copy_rows(source, target, table, condition, params, omit=()):
     if not rows:
         return
     columns = [name for name in rows[0].keys() if name not in omit]
-    target.executemany(f'INSERT OR REPLACE INTO {table} ({",".join(columns)}) VALUES ({",".join("?" for _ in columns)})',
-                       [tuple(row[name] for name in columns) for row in rows])
+    insert_rows(target, table, columns, rows, PRIMARY_KEYS.get(table))
+
+
+def insert_rows(target, table, columns, rows, conflict_key=None):
+    names = ','.join(f'"{name}"' for name in columns)
+    placeholders = ','.join('?' for _ in columns)
+    sql = f'INSERT INTO {table} ({names}) VALUES ({placeholders})'
+    if conflict_key:
+        keys = ','.join(conflict_key)
+        updates = ','.join(f'"{name}"=excluded."{name}"' for name in columns if name not in conflict_key)
+        sql += f' ON CONFLICT ({keys}) DO UPDATE SET {updates}'
+    target.executemany(sql, (tuple(row[name] for name in columns) for row in rows))
 
 
 def copy_video(source, target, video_id):
@@ -82,14 +97,11 @@ def copy_video(source, target, video_id):
 
 
 def drop_video(con, video_id):
-    row = con.execute('SELECT rowid FROM videos WHERE id=?', (video_id,)).fetchone()
-    if row:
-        con.execute('DELETE FROM video_search WHERE rowid=?', (row[0],))
-    con.execute('DELETE FROM search_short_terms WHERE video_id=?', (video_id,))
     con.execute('DELETE FROM summary_checkpoints WHERE job_id IN (SELECT id FROM jobs WHERE video_id=?)', (video_id,))
     con.execute('DELETE FROM jobs WHERE video_id=?', (video_id,))
     for table in VIDEO_TABLES + ('library_links', 'library_items'):
         con.execute(f'DELETE FROM {table} WHERE video_id=?', (video_id,))
+    search.sync(con, video_id)
     con.execute('DELETE FROM videos WHERE id=?', (video_id,))
 
 
@@ -105,11 +117,13 @@ def forget_promoted(database, ids):
                 drop_video(_memory, ident)
 
 
-def demote(con, database, video_id):
+@contextmanager
+def demotion(database):
     if active(database):
         with _memory:
-            copy_video(con, _memory, video_id)
-        drop_video(con, video_id)
+            yield _memory
+    else:
+        yield None
 
 
 @locked
@@ -117,7 +131,23 @@ def start(database, initialize):
     """Call before workers start. Old unsaved research is archived once, not reused."""
     global _memory, _database, _session_id
     end()
-    with connection(database) as disk:
+    if not config.DATABASE_URL:
+        archive_legacy_drafts(database)
+    _memory = sqlite3.connect(':memory:', check_same_thread=False)
+    _memory.row_factory = sqlite3.Row
+    _memory.execute('PRAGMA foreign_keys=ON')
+    _memory.execute('PRAGMA temp_store=MEMORY')
+    _database = str(database)
+    _session_id = uuid.uuid4().hex
+    try:
+        initialize(temporary=True)
+    except Exception:
+        end()
+        raise
+
+
+def archive_legacy_drafts(database):
+    with storage.sqlite_connection(database) as disk:
         if not disk.execute('SELECT 1 FROM schema_version WHERE version=9').fetchone():
             unsaved = [r[0] for r in disk.execute('SELECT id FROM videos WHERE id NOT IN (SELECT video_id FROM library_items)')]
             transient_jobs = [r[0] for r in disk.execute("SELECT id FROM jobs WHERE kind<>'sync' AND (video_id IS NULL OR video_id NOT IN (SELECT video_id FROM library_items))")]
@@ -131,14 +161,3 @@ def start(database, initialize):
                 disk.execute('DELETE FROM summary_checkpoints WHERE job_id=?', (ident,))
                 disk.execute('DELETE FROM jobs WHERE id=?', (ident,))
             disk.execute('INSERT INTO schema_version VALUES(9)')
-    _memory = sqlite3.connect(':memory:', check_same_thread=False)
-    _memory.row_factory = sqlite3.Row
-    _memory.execute('PRAGMA foreign_keys=ON')
-    _memory.execute('PRAGMA temp_store=MEMORY')
-    _database = str(database)
-    _session_id = uuid.uuid4().hex
-    try:
-        initialize(temporary=True)
-    except Exception:
-        end()
-        raise

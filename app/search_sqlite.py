@@ -1,4 +1,5 @@
-"""SQLite search adapter: trigram/short-term indexes, filters, and newest-first ordering."""
+"""SQLite search adapter: trigram and short-term indexes."""
+from .search_query import ASCII_LOWER, find_videos
 
 def sync(con, video_id):
     """Maintain search indexes in the same transaction as the library write."""
@@ -13,10 +14,9 @@ def sync(con, video_id):
         return
     con.execute('INSERT INTO video_search(rowid,title,transcript,summary) VALUES(?,?,?,?)', tuple(row))
     # SQLite LIKE folds ASCII only. Preserve the same matching behavior.
-    fold = str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')
     terms = set()
     for value in row[1:]:
-        value = value.translate(fold)
+        value = value.translate(ASCII_LOWER)
         terms.update(value)
         terms.update(value[i:i+2] for i in range(len(value)-1))
     con.executemany('INSERT INTO search_short_terms(term,video_id) VALUES(?,?)',
@@ -32,37 +32,23 @@ def initialize(con):
             sync(con, row[0])
         con.execute('INSERT INTO schema_version VALUES(5)')
 
+def text_filter(text):
+    clauses, params = [], []
+    if len(text) >= 3:
+        clauses.append('v.rowid IN (SELECT rowid FROM video_search WHERE video_search MATCH ?)')
+        params.append('"' + text.replace('"', '""') + '"')
+    else:
+        clauses.append('v.id IN (SELECT video_id FROM search_short_terms WHERE term=?)')
+        params.append(text.translate(ASCII_LOWER))
+    # Verify literal substring semantics only on indexed candidates.
+    clauses.append("(v.title LIKE ? ESCAPE '\\' OR t.text LIKE ? ESCAPE '\\' OR s.markdown LIKE ? ESCAPE '\\')")
+    query = '%' + text.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+    params.extend([query] * 3)
+    return clauses, params
+
+
 def find(con, filters, limit=1000):
-    clauses, params = ['EXISTS(SELECT 1 FROM library_items l WHERE l.video_id=v.id)'], []
-    for name, column in [('creator', 'v.creator'), ('category', 'v.category'), ('language', 'v.language')]:
-        if filters.get(name):
-            clauses.append(f'{column} = ?')
-            params.append(filters[name])
-    if filters.get('q'):
-        text = filters['q']
-        if len(text) >= 3:
-            clauses.append('v.rowid IN (SELECT rowid FROM video_search WHERE video_search MATCH ?)')
-            params.append('"' + text.replace('"', '""') + '"')
-        else:
-            clauses.append('v.id IN (SELECT video_id FROM search_short_terms WHERE term=?)')
-            params.append(text.translate(str.maketrans('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')))
-        # Verify literal substring semantics only on indexed candidates.
-        clauses.append("(v.title LIKE ? ESCAPE '\\' OR t.text LIKE ? ESCAPE '\\' OR s.markdown LIKE ? ESCAPE '\\')")
-        query = '%' + filters['q'].replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
-        params.extend([query] * 3)
-    if filters.get('ticker'):
-        clauses.append('EXISTS(SELECT 1 FROM mentions m WHERE m.video_id=v.id AND m.ticker=?)')
-        params.append(filters['ticker'].upper().lstrip('$'))
-    for name, op in [('from', '>='), ('to', '<=')]:
-        if filters.get(name):
-            clauses.append(f'substr(v.published_at,1,10) {op} ?')
-            params.append(filters[name][:10])
-    where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
-    rows = con.execute('''SELECT v.id FROM videos v
-            LEFT JOIN transcripts t ON t.video_id=v.id
-            LEFT JOIN summaries s ON s.video_id=v.id''' + where +
-            ' ORDER BY COALESCE(v.published_at,v.created_at) DESC,v.id LIMIT ?', params + [limit]).fetchall()
-    return [row['id'] for row in rows]
+    return find_videos(con, filters, text_filter, limit)
 
 
 class SQLiteSearch:

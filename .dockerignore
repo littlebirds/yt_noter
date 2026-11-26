@@ -5,6 +5,7 @@
 .venv
 .env
 .env.*
+postgres-password.txt
 data
 __pycache__
 **/__pycache__

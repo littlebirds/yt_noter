@@ -3,7 +3,7 @@ import json
 import logging
 import threading
 import uuid
-from . import config, db, media, summarize, feeds, llm_settings, slides
+from . import config, db, media, summarize, feeds, llm_settings, slides, storage
 
 log = logging.getLogger(__name__)
 STOP = threading.Event()
@@ -15,7 +15,7 @@ def enqueue(kind, payload, video_id=None):
     if kind not in {'discover', 'process', 'sync'}:
         raise ValueError('This job type is no longer supported.')
     with db.connect(video_id=video_id, temporary=kind == 'discover') as con:
-        con.execute('BEGIN IMMEDIATE')
+        storage.begin_write(con)
         if video_id:
             existing = con.execute("SELECT id FROM jobs WHERE kind=? AND video_id=? AND status IN ('queued','running')",
                                    (kind, video_id)).fetchone()
@@ -39,7 +39,7 @@ def enqueue(kind, payload, video_id=None):
 def retry(job_id):
     """Retry in place; concurrent clicks and historical cards share one active job."""
     with db.connect(job_id=job_id) as con:
-        con.execute('BEGIN IMMEDIATE')
+        storage.begin_write(con)
         row = con.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
         if not row:
             raise LookupError('Job not found.')
@@ -60,7 +60,7 @@ def retry(job_id):
             if active:
                 return active['id']
         elif row['kind'] == 'sync':
-            active = con.execute("SELECT id FROM jobs WHERE kind='sync' AND status IN ('queued','running') AND json_extract(payload_json,'$.source_id')=?", (json.loads(row['payload_json'])['source_id'],)).fetchone()
+            active = con.execute(f"SELECT id FROM jobs WHERE kind='sync' AND status IN ('queued','running') AND {storage.job_source(con)}=?", (json.loads(row['payload_json'])['source_id'],)).fetchone()
             if active:
                 return active['id']
         if row['kind'] not in {'process', 'sync', 'discover', 'slides'}:

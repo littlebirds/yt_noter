@@ -35,7 +35,7 @@ Keep this `DATA_DIR` path for subsequent runs. If Docker preserved a different f
 
 `make local-inference` exposes the existing llama.cpp service only at `127.0.0.1:8080`. It can recreate the inference container to add the port; it does not rebuild the model image. Native defaults already use this address and the existing Qwen 3B alias. Set `LLM_URL` if using a different port or a native `llama-server`. If inference is stopped, browsing and saving links still work; summaries require it.
 
-Native mode reads exported environment variables, **not `.env` automatically**. Set `DATA_DIR`, `PORT`, `AUTH_TOKEN`, `LLM_URL`, `WHISPER_MODEL`, or `YOUTUBE_COOKIES` before starting as needed. Host Whisper downloads its own cache on first use; Docker's speech cache remains untouched.
+Native mode reads exported environment variables. Export `DATABASE_URL` to use PostgreSQL. Set `DATA_DIR`, `PORT`, `AUTH_TOKEN`, `LLM_URL`, `WHISPER_MODEL`, or `YOUTUBE_COOKIES` before starting as needed. Host Whisper downloads its own cache on first use.
 
 To inspect the failing video directly:
 
@@ -157,7 +157,7 @@ Run `docker compose exec -T app python -m app.diagnose 'https://www.youtube.com/
 
 ## Search backend boundary
 
-`app/search.py` defines the `SearchBackend` contract and selects the current adapter. `app/search_sqlite.py` owns FTS5/short-term indexes, search schema migration, filtering, limits, and result ordering. `app/db.py` remains the authoritative store and loads the ordered video IDs returned by search; the HTTP endpoint and UI do not depend on SQLite search syntax.
+`app/search.py` selects the search implementation for the active database. `app/search_sqlite.py` maintains SQLite's FTS5 and short-term indexes, and `app/search_query.py` shares filters, ordering, and limits. `app/db.py` loads the ordered video IDs returned by search.
 
 Adapters implement:
 

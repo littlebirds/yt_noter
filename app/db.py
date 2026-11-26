@@ -3,7 +3,7 @@ import json
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from . import config, search, session_store
+from . import config, search, session_store, storage
 
 
 def now():
@@ -31,102 +31,111 @@ def start_session():
 
 def init(temporary=False):
     with connect(temporary=temporary) as con:
+        initialize(con)
+
+
+def initialize(con):
+    postgres = isinstance(con, storage.PostgreSQLConnection)
+    if not postgres:
         con.execute('PRAGMA journal_mode=WAL')
-        con.executescript('''
-        CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY);
-        INSERT OR IGNORE INTO schema_version VALUES(1);
-        INSERT OR IGNORE INTO schema_version VALUES(2);
-        CREATE TABLE IF NOT EXISTS videos(
-            id TEXT PRIMARY KEY, url TEXT NOT NULL, title TEXT NOT NULL,
-            creator TEXT NOT NULL DEFAULT '', channel_id TEXT,
-            published_at TEXT, duration REAL, language TEXT,
-            category TEXT NOT NULL DEFAULT 'other', metadata_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS videos_date ON videos(published_at);
-        CREATE INDEX IF NOT EXISTS videos_creator ON videos(creator);
-        CREATE INDEX IF NOT EXISTS videos_category ON videos(category);
-        CREATE TABLE IF NOT EXISTS transcripts(
-            video_id TEXT PRIMARY KEY REFERENCES videos(id), language TEXT NOT NULL,
-            source TEXT NOT NULL, text TEXT NOT NULL, segments_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS summaries(
-            video_id TEXT PRIMARY KEY REFERENCES videos(id), markdown TEXT NOT NULL,
-            model TEXT NOT NULL, data_json TEXT NOT NULL, created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS mentions(
-            id INTEGER PRIMARY KEY, video_id TEXT NOT NULL REFERENCES videos(id),
-            ticker TEXT NOT NULL, stance TEXT NOT NULL, evidence TEXT NOT NULL,
-            timestamp REAL NOT NULL, extra_json TEXT NOT NULL DEFAULT '{}'
-        );
-        CREATE INDEX IF NOT EXISTS mentions_ticker ON mentions(ticker, video_id);
-        CREATE TABLE IF NOT EXISTS jobs(
-            id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL,
-            video_id TEXT, status TEXT NOT NULL, progress TEXT NOT NULL DEFAULT '',
-            result_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, created_at);
-        CREATE TABLE IF NOT EXISTS sources(
-            id TEXT PRIMARY KEY, url TEXT UNIQUE NOT NULL, since TEXT NOT NULL,
-            enabled INTEGER NOT NULL DEFAULT 1, checkpoint TEXT, cursor INTEGER NOT NULL DEFAULT 0,
-            scan_started TEXT, next_scan TEXT NOT NULL, last_checked TEXT, last_error TEXT,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS library_items(
-            video_id TEXT PRIMARY KEY REFERENCES videos(id), saved_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS library_links(
-            source_url TEXT NOT NULL, video_id TEXT NOT NULL REFERENCES videos(id),
-            PRIMARY KEY(source_url, video_id)
-        );
-        CREATE TABLE IF NOT EXISTS source_videos(
-            source_id TEXT NOT NULL REFERENCES sources(id), video_id TEXT NOT NULL,
-            first_seen TEXT NOT NULL, PRIMARY KEY(source_id, video_id)
-        );
-        ''')
-        if not con.execute('SELECT 1 FROM schema_version WHERE version=4').fetchone():
-            con.execute('ALTER TABLE sources ADD COLUMN channel_id TEXT')
-            con.execute('ALTER TABLE sources ADD COLUMN last_reconciled TEXT')
-            con.execute('INSERT INTO schema_version VALUES(4)')
-        # Preserve the pre-existing library once; later processing results are drafts.
-        if not con.execute('SELECT 1 FROM schema_version WHERE version=3').fetchone():
-            con.execute('INSERT OR IGNORE INTO library_items SELECT id,created_at FROM videos')
-            con.execute('INSERT OR IGNORE INTO library_links SELECT url,id FROM videos')
-            con.execute('INSERT INTO schema_version VALUES(3)')
-        if not con.execute('SELECT 1 FROM schema_version WHERE version=6').fetchone():
-            con.execute('CREATE TABLE slide_scans(video_id TEXT PRIMARY KEY REFERENCES videos(id), minimum REAL NOT NULL, created_at TEXT NOT NULL)')
-            con.execute("""CREATE TABLE slides(video_id TEXT NOT NULL REFERENCES videos(id), position INTEGER NOT NULL,
-                        start REAL NOT NULL, end REAL NOT NULL, timestamp REAL NOT NULL, image BLOB NOT NULL,
-                        PRIMARY KEY(video_id, position))""")
-            con.execute('INSERT INTO schema_version VALUES(6)')
-        if not con.execute('SELECT 1 FROM schema_version WHERE version=7').fetchone():
-            con.execute("ALTER TABLE slides ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'unknown'")
-            con.execute('INSERT INTO schema_version VALUES(7)')
-        if not con.execute('SELECT 1 FROM schema_version WHERE version=8').fetchone():
-            con.execute("""CREATE TABLE summary_checkpoints(
-                job_id TEXT NOT NULL REFERENCES jobs(id), fingerprint TEXT NOT NULL,
-                stage TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL,
-                PRIMARY KEY(job_id,fingerprint,stage))""")
-            con.execute('INSERT INTO schema_version VALUES(8)')
-        if not con.execute('SELECT 1 FROM schema_version WHERE version=10').fetchone():
-            for old in con.execute("SELECT * FROM jobs WHERE kind='slides' AND status IN ('queued','running','failed')").fetchall():
-                active = con.execute("SELECT id,payload_json FROM jobs WHERE kind='process' AND video_id=? AND status IN ('queued','running')", (old['video_id'],)).fetchone()
-                payload = json.loads(old['payload_json'])
-                if active:
-                    combined = json.loads(active['payload_json'])
-                    combined.update({'force_slides': True, 'minimum': payload.get('minimum', 4)})
-                    con.execute('UPDATE jobs SET payload_json=? WHERE id=?', (dumps(combined),active['id']))
-                    con.execute("UPDATE jobs SET status='cancelled',progress='Included in composite video job',updated_at=? WHERE id=?", (now(),old['id']))
-                else:
-                    payload['force_slides'] = True
-                    con.execute("UPDATE jobs SET kind='process',payload_json=? WHERE id=?", (dumps(payload),old['id']))
-            con.execute('INSERT INTO schema_version VALUES(10)')
-        search.initialize(con)
-        # Retire removed capture jobs without deleting historical records or media.
-        con.execute("UPDATE jobs SET status='cancelled', progress='Capture feature removed', error=NULL, updated_at=? WHERE kind='frame' AND status IN ('queued','running','failed')", (now(),))
-        # Single worker process: interrupted operations can safely be retried.
-        con.execute("UPDATE jobs SET status='queued', progress='Resuming after restart', updated_at=? WHERE status='running'", (now(),))
+    mention_id = 'BIGINT GENERATED BY DEFAULT AS IDENTITY' if postgres else 'INTEGER'
+    real = 'DOUBLE PRECISION' if postgres else 'REAL'
+    blob = 'BYTEA' if postgres else 'BLOB'
+    con.executescript(f'''
+    CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY);
+    INSERT INTO schema_version VALUES(1) ON CONFLICT DO NOTHING;
+    INSERT INTO schema_version VALUES(2) ON CONFLICT DO NOTHING;
+    CREATE TABLE IF NOT EXISTS videos(
+        id TEXT PRIMARY KEY, url TEXT NOT NULL, title TEXT NOT NULL,
+        creator TEXT NOT NULL DEFAULT '', channel_id TEXT,
+        published_at TEXT, duration {real}, language TEXT,
+        category TEXT NOT NULL DEFAULT 'other', metadata_json TEXT NOT NULL DEFAULT '{{}}',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS videos_date ON videos(published_at);
+    CREATE INDEX IF NOT EXISTS videos_creator ON videos(creator);
+    CREATE INDEX IF NOT EXISTS videos_category ON videos(category);
+    CREATE TABLE IF NOT EXISTS transcripts(
+        video_id TEXT PRIMARY KEY REFERENCES videos(id), language TEXT NOT NULL,
+        source TEXT NOT NULL, text TEXT NOT NULL, segments_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS summaries(
+        video_id TEXT PRIMARY KEY REFERENCES videos(id), markdown TEXT NOT NULL,
+        model TEXT NOT NULL, data_json TEXT NOT NULL, created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS mentions(
+        id {mention_id} PRIMARY KEY, video_id TEXT NOT NULL REFERENCES videos(id),
+        ticker TEXT NOT NULL, stance TEXT NOT NULL, evidence TEXT NOT NULL,
+        timestamp {real} NOT NULL, extra_json TEXT NOT NULL DEFAULT '{{}}'
+    );
+    CREATE INDEX IF NOT EXISTS mentions_ticker ON mentions(ticker, video_id);
+    CREATE TABLE IF NOT EXISTS jobs(
+        id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL,
+        video_id TEXT, status TEXT NOT NULL, progress TEXT NOT NULL DEFAULT '',
+        result_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, created_at);
+    CREATE TABLE IF NOT EXISTS sources(
+        id TEXT PRIMARY KEY, url TEXT UNIQUE NOT NULL, since TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1, checkpoint TEXT, cursor INTEGER NOT NULL DEFAULT 0,
+        scan_started TEXT, next_scan TEXT NOT NULL, last_checked TEXT, last_error TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS library_items(
+        video_id TEXT PRIMARY KEY REFERENCES videos(id), saved_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS library_links(
+        source_url TEXT NOT NULL, video_id TEXT NOT NULL REFERENCES videos(id),
+        PRIMARY KEY(source_url, video_id)
+    );
+    CREATE TABLE IF NOT EXISTS source_videos(
+        source_id TEXT NOT NULL REFERENCES sources(id), video_id TEXT NOT NULL,
+        first_seen TEXT NOT NULL, PRIMARY KEY(source_id, video_id)
+    );
+    ''')
+    if not con.execute('SELECT 1 FROM schema_version WHERE version=4').fetchone():
+        con.execute('ALTER TABLE sources ADD COLUMN channel_id TEXT')
+        con.execute('ALTER TABLE sources ADD COLUMN last_reconciled TEXT')
+        con.execute('INSERT INTO schema_version VALUES(4)')
+    # Preserve the pre-existing library once; later processing results are drafts.
+    if not con.execute('SELECT 1 FROM schema_version WHERE version=3').fetchone():
+        con.execute('INSERT INTO library_items SELECT id,created_at FROM videos WHERE TRUE ON CONFLICT DO NOTHING')
+        con.execute('INSERT INTO library_links SELECT url,id FROM videos WHERE TRUE ON CONFLICT DO NOTHING')
+        con.execute('INSERT INTO schema_version VALUES(3)')
+    if not con.execute('SELECT 1 FROM schema_version WHERE version=6').fetchone():
+        con.execute(f'CREATE TABLE slide_scans(video_id TEXT PRIMARY KEY REFERENCES videos(id), minimum {real} NOT NULL, created_at TEXT NOT NULL)')
+        con.execute(f"""CREATE TABLE slides(video_id TEXT NOT NULL REFERENCES videos(id), position INTEGER NOT NULL,
+                    start {real} NOT NULL, "end" {real} NOT NULL, timestamp {real} NOT NULL, image {blob} NOT NULL,
+                    PRIMARY KEY(video_id, position))""")
+        con.execute('INSERT INTO schema_version VALUES(6)')
+    if not con.execute('SELECT 1 FROM schema_version WHERE version=7').fetchone():
+        con.execute("ALTER TABLE slides ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'unknown'")
+        con.execute('INSERT INTO schema_version VALUES(7)')
+    if not con.execute('SELECT 1 FROM schema_version WHERE version=8').fetchone():
+        con.execute("""CREATE TABLE summary_checkpoints(
+            job_id TEXT NOT NULL REFERENCES jobs(id), fingerprint TEXT NOT NULL,
+            stage TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL,
+            PRIMARY KEY(job_id,fingerprint,stage))""")
+        con.execute('INSERT INTO schema_version VALUES(8)')
+    if not con.execute('SELECT 1 FROM schema_version WHERE version=10').fetchone():
+        for old in con.execute("SELECT * FROM jobs WHERE kind='slides' AND status IN ('queued','running','failed')").fetchall():
+            active = con.execute("SELECT id,payload_json FROM jobs WHERE kind='process' AND video_id=? AND status IN ('queued','running')", (old['video_id'],)).fetchone()
+            payload = json.loads(old['payload_json'])
+            if active:
+                combined = json.loads(active['payload_json'])
+                combined.update({'force_slides': True, 'minimum': payload.get('minimum', 4)})
+                con.execute('UPDATE jobs SET payload_json=? WHERE id=?', (dumps(combined),active['id']))
+                con.execute("UPDATE jobs SET status='cancelled',progress='Included in composite video job',updated_at=? WHERE id=?", (now(),old['id']))
+            else:
+                payload['force_slides'] = True
+                con.execute("UPDATE jobs SET kind='process',payload_json=? WHERE id=?", (dumps(payload),old['id']))
+        con.execute('INSERT INTO schema_version VALUES(10)')
+    search.initialize(con)
+    # Retire removed capture jobs without deleting historical records or media.
+    con.execute("UPDATE jobs SET status='cancelled', progress='Capture feature removed', error=NULL, updated_at=? WHERE kind='frame' AND status IN ('queued','running','failed')", (now(),))
+    # Single worker process: interrupted operations can safely be retried.
+    con.execute("UPDATE jobs SET status='queued', progress='Resuming after restart', updated_at=? WHERE status='running'", (now(),))
 
 
 def save_video(video):
@@ -146,7 +155,9 @@ def save_video(video):
 def save_transcript(video_id, language, source, segments):
     text = '\n'.join(s['text'] for s in segments)
     with connect(video_id=video_id) as con:
-        con.execute('INSERT OR REPLACE INTO transcripts VALUES(?,?,?,?,?,?)',
+        con.execute('''INSERT INTO transcripts VALUES(?,?,?,?,?,?) ON CONFLICT(video_id) DO UPDATE SET
+                    language=excluded.language,source=excluded.source,text=excluded.text,
+                    segments_json=excluded.segments_json,created_at=excluded.created_at''',
                     (video_id, language, source, text, dumps(segments), now()))
         con.execute('UPDATE videos SET language=?, updated_at=? WHERE id=?', (language, now(), video_id))
         search.sync(con, video_id)
@@ -154,7 +165,9 @@ def save_transcript(video_id, language, source, segments):
 
 def save_summary(video_id, result, model):
     with connect(video_id=video_id) as con:
-        con.execute('INSERT OR REPLACE INTO summaries VALUES(?,?,?,?,?)',
+        con.execute('''INSERT INTO summaries VALUES(?,?,?,?,?) ON CONFLICT(video_id) DO UPDATE SET
+                    markdown=excluded.markdown,model=excluded.model,data_json=excluded.data_json,
+                    created_at=excluded.created_at''',
                     (video_id, result['summary'], model, dumps(result), now()))
         con.execute('UPDATE videos SET category=?,updated_at=? WHERE id=?',
                     (result['category'], now(), video_id))
@@ -183,7 +196,7 @@ def detail(video_id):
         result['source_urls'] = [r[0] for r in con.execute('SELECT source_url FROM library_links WHERE video_id=?', (video_id,))]
         scan = con.execute('SELECT minimum,created_at FROM slide_scans WHERE video_id=?', (video_id,)).fetchone()
         result['slide_scan'] = dict(scan) if scan else None
-        result['slides'] = [dict(r) for r in con.execute('SELECT position,start,end,timestamp,content_kind FROM slides WHERE video_id=? ORDER BY position', (video_id,))]
+        result['slides'] = [dict(r) for r in con.execute('SELECT position,start,"end",timestamp,content_kind FROM slides WHERE video_id=? ORDER BY position', (video_id,))]
         result['mentions'] = [dict(r) for r in con.execute('SELECT * FROM mentions WHERE video_id=?', (video_id,))]
         return result
 
@@ -191,12 +204,16 @@ def detail(video_id):
 def library(filters):
     with connect() as con:
         ids = search.find(con, filters, limit=1000)
-        rows_by_id = {r['id']: r for r in con.execute("""SELECT v.*, s.markdown AS summary_preview,
+        if isinstance(con, storage.PostgreSQLConnection):
+            id_query = 'SELECT json_array_elements_text(CAST(? AS json))'
+        else:
+            id_query = 'SELECT value FROM json_each(?)'
+        rows_by_id = {r['id']: r for r in con.execute(f"""SELECT v.*, s.markdown AS summary_preview,
             t.source AS transcript_source FROM videos v
             LEFT JOIN transcripts t ON t.video_id=v.id
             LEFT JOIN summaries s ON s.video_id=v.id
-            WHERE v.id IN (SELECT value FROM json_each(?))
-              AND EXISTS(SELECT 1 FROM library_items l WHERE l.video_id=v.id)""", (dumps(ids),))}
+            WHERE v.id IN ({id_query})
+              AND EXISTS(SELECT 1 FROM library_items l WHERE l.video_id=v.id)""", (dumps(ids),))} if ids else {}
         rows = [rows_by_id[ident] for ident in ids if ident in rows_by_id]
         creators = [r[0] for r in con.execute("SELECT DISTINCT creator FROM videos WHERE creator<>'' AND id IN (SELECT video_id FROM library_items) ORDER BY creator")]
         stats = dict(con.execute('''SELECT (SELECT count(*) FROM library_items) AS videos,
@@ -282,8 +299,8 @@ def mark_library(video_id, source_url):
     """Save automatically discovered uploads from an already-saved subscription."""
     with connect() as con:
         session_store.promote(con, config.DB, video_id)
-        con.execute('INSERT OR IGNORE INTO library_items VALUES(?,?)', (video_id, now()))
-        con.execute('INSERT OR IGNORE INTO library_links VALUES(?,?)', (source_url, video_id))
+        con.execute('INSERT INTO library_items VALUES(?,?) ON CONFLICT DO NOTHING', (video_id, now()))
+        con.execute('INSERT INTO library_links VALUES(?,?) ON CONFLICT DO NOTHING', (source_url, video_id))
         search.sync(con, video_id)
     session_store.forget_promoted(config.DB, [video_id])
 
@@ -291,7 +308,7 @@ def mark_library(video_id, source_url):
 @session_store.locked
 def add_to_library(ids, source_url, is_feed):
     with connect() as con:
-        con.execute('BEGIN IMMEDIATE')
+        storage.begin_write(con)
         # Discovery previews are enough to save links; transcription is independent.
         previews = {}
         for temporary in stores():
@@ -306,12 +323,12 @@ def add_to_library(ids, source_url, is_feed):
             session_store.promote(con, config.DB, ident)
             url = f'https://www.youtube.com/watch?v={ident}'
             preview = previews.get(ident, {})
-            con.execute('''INSERT OR IGNORE INTO videos(id,url,title,creator,channel_id,published_at,duration,metadata_json,created_at,updated_at)
-                           VALUES(?,?,?,?,?,?,?,?,?,?)''', (ident, url, preview.get('title') or url,
+            con.execute('''INSERT INTO videos(id,url,title,creator,channel_id,published_at,duration,metadata_json,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING''', (ident, url, preview.get('title') or url,
                            preview.get('creator') or '', preview.get('channel_id'), preview.get('published_at'),
                            preview.get('duration'), dumps(preview.get('metadata', {})), now(), now()))
-            added += con.execute('INSERT OR IGNORE INTO library_items VALUES(?,?)', (ident, now())).rowcount
-            linked += con.execute('INSERT OR IGNORE INTO library_links VALUES(?,?)', (source_url, ident)).rowcount
+            added += con.execute('INSERT INTO library_items VALUES(?,?) ON CONFLICT DO NOTHING', (ident, now())).rowcount
+            linked += con.execute('INSERT INTO library_links VALUES(?,?) ON CONFLICT DO NOTHING', (source_url, ident)).rowcount
             search.sync(con, ident)
             # Save and enqueue in one transaction so a crash cannot leave an unqueued link.
             if not research_ready(con, ident):
@@ -328,12 +345,12 @@ def add_to_library(ids, source_url, is_feed):
                     job_ids.append(job_id)
         if is_feed:
             # Saving is the explicit opt-in to future feed monitoring.
-            con.execute('INSERT OR IGNORE INTO sources(id,url,since,next_scan,created_at) VALUES(?,?,?,?,?)',
+            con.execute('INSERT INTO sources(id,url,since,next_scan,created_at) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING',
                         (uuid.uuid4().hex, source_url, now(), now(), now()))
             con.execute('UPDATE sources SET enabled=1,next_scan=? WHERE url=?', (now(), source_url))
             source_id = con.execute('SELECT id FROM sources WHERE url=?', (source_url,)).fetchone()[0]
             for ident in ids:
-                con.execute('INSERT OR IGNORE INTO source_videos VALUES(?,?,?)', (source_id, ident, now()))
+                con.execute('INSERT INTO source_videos VALUES(?,?,?) ON CONFLICT DO NOTHING', (source_id, ident, now()))
             monitoring = bool(con.execute('SELECT enabled FROM sources WHERE url=?', (source_url,)).fetchone()[0])
     session_store.forget_promoted(config.DB, ids)
     return {'job_ids': job_ids, 'saved': added, 'linked': linked, 'already_saved': len(ids) - linked, 'monitoring': monitoring if is_feed else False}
@@ -342,8 +359,8 @@ def add_to_library(ids, source_url, is_feed):
 @session_store.locked
 def delete_summary(video_id):
     """Remove a saved summary, retaining transcripts and feed deduplication history."""
-    with connect() as con:
-        con.execute('BEGIN IMMEDIATE')
+    with session_store.demotion(config.DB) as drafts, connect() as con:
+        storage.begin_write(con)
         if con.execute("SELECT 1 FROM jobs WHERE video_id=? AND kind='process' AND status='running'", (video_id,)).fetchone():
             raise ValueError('This video is processing. Wait for it to finish before deleting its summary.')
         if not con.execute('SELECT 1 FROM library_items WHERE video_id=?', (video_id,)).fetchone():
@@ -352,8 +369,11 @@ def delete_summary(video_id):
         for table in ('mentions', 'summaries', 'library_items', 'library_links'):
             con.execute(f'DELETE FROM {table} WHERE video_id=?', (video_id,))
         con.execute("UPDATE videos SET category='other',updated_at=? WHERE id=?", (now(), video_id))
-        search.sync(con, video_id)
-        session_store.demote(con, config.DB, video_id)
+        if drafts is not None:
+            session_store.copy_video(con, drafts, video_id)
+            session_store.drop_video(con, video_id)
+        else:
+            search.sync(con, video_id)
     return {'ok': True}
 
 
@@ -371,9 +391,10 @@ def save_slides(video_id, slides, minimum):
     # Replace only after a complete scan; failed/restarted jobs retain previous results.
     with connect(video_id=video_id) as con:
         con.execute('DELETE FROM slides WHERE video_id=?', (video_id,))
-        con.executemany('INSERT INTO slides(video_id,position,start,end,timestamp,image,content_kind) VALUES(?,?,?,?,?,?,?)',
+        con.executemany('INSERT INTO slides(video_id,position,start,"end",timestamp,image,content_kind) VALUES(?,?,?,?,?,?,?)',
                         [(video_id, i, s['start'], s['end'], s['timestamp'], s['image'], s.get('content_kind', 'unknown')) for i, s in enumerate(slides)])
-        con.execute('INSERT OR REPLACE INTO slide_scans VALUES(?,?,?)', (video_id, minimum, now()))
+        con.execute('''INSERT INTO slide_scans VALUES(?,?,?) ON CONFLICT(video_id) DO UPDATE SET
+                     minimum=excluded.minimum,created_at=excluded.created_at''', (video_id, minimum, now()))
 
 
 def research_ready(con, video_id):
@@ -390,5 +411,6 @@ def summary_checkpoint(job_id, fingerprint, stage):
 
 def save_summary_checkpoint(job_id, fingerprint, stage, result):
     with connect(job_id=job_id) as con:
-        con.execute('INSERT OR REPLACE INTO summary_checkpoints VALUES(?,?,?,?,?)',
+        con.execute('''INSERT INTO summary_checkpoints VALUES(?,?,?,?,?) ON CONFLICT(job_id,fingerprint,stage) DO UPDATE SET
+                    result_json=excluded.result_json,created_at=excluded.created_at''',
                     (job_id, fingerprint, stage, dumps(result), now()))

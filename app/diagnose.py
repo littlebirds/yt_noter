@@ -2,10 +2,9 @@
 import argparse
 import inspect
 import json
-import sqlite3
 from importlib.metadata import PackageNotFoundError, version
 
-from . import config, media
+from . import config, media, storage
 
 
 def report(url):
@@ -19,14 +18,13 @@ def report(url):
         installed = 'not installed'
     result = {'video_url': url, 'yt_dlp_version': installed,
               'audio_selection_fix_loaded': 'def usable(f)' in inspect.getsource(media.audio_format)}
-    if config.DB.exists():
-        con = sqlite3.connect(f'{config.DB.as_uri()}?mode=ro', uri=True)
-        try:
+    if config.DATABASE_URL or config.DB.exists():
+        connection = (storage.persistent_connection(config.DB) if config.DATABASE_URL else
+                      storage.sqlite_connection(f'{config.DB.as_uri()}?mode=ro', uri=True))
+        with connection as con:
             row = con.execute("SELECT status,progress,error,updated_at FROM jobs WHERE video_id=? AND kind='process' ORDER BY created_at DESC LIMIT 1", (ident,)).fetchone()
             if row:
-                result['latest_job'] = dict(zip(('status', 'progress', 'error', 'updated_at'), row))
-        finally:
-            con.close()
+                result['latest_job'] = dict(row)
     # Print local evidence first, even if YouTube metadata lookup times out.
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
     info = media.video_info(url)
